@@ -81,7 +81,7 @@ def test_duplicate_output_names_block_batch(tmp_path):
     report = validate_preflight(workbook, template, mappings, destination)
 
     assert any(
-        issue.code == "duplicate_output_filename" and issue.blocking
+        issue.code == "validation.duplicate_output_filename" and issue.blocking
         for issue in report.issues
     )
 
@@ -93,8 +93,8 @@ def test_missing_mapping_and_blank_value_are_both_reported(tmp_path):
     report = validate_preflight(workbook, template, mappings, destination)
 
     assert {issue.code for issue in report.issues} >= {
-        "unresolved_placeholder",
-        "blank_mapped_value",
+        "validation.unresolved_placeholder",
+        "validation.blank_mapped_value",
     }
     assert report.ready is False
 
@@ -107,7 +107,7 @@ def test_unknown_mapped_column_is_reported(tmp_path):
 
     report = validate_preflight(workbook, template, mappings, destination)
 
-    assert any(issue.code == "unknown_workbook_column" for issue in report.issues)
+    assert any(issue.code == "validation.unknown_workbook_column" for issue in report.issues)
 
 
 def test_duplicate_normalized_recipient_is_reported(tmp_path):
@@ -115,7 +115,7 @@ def test_duplicate_normalized_recipient_is_reported(tmp_path):
 
     report = validate_preflight(workbook, template, mappings, destination)
 
-    assert any(issue.code == "duplicate_recipient" for issue in report.issues)
+    assert any(issue.code == "validation.duplicate_recipient" for issue in report.issues)
 
 
 def test_excessively_long_mapped_value_is_blocking(tmp_path):
@@ -123,7 +123,7 @@ def test_excessively_long_mapped_value_is_blocking(tmp_path):
 
     report = validate_preflight(workbook, template, mappings, destination)
 
-    assert any(issue.code == "value_too_long" and issue.blocking for issue in report.issues)
+    assert any(issue.code == "validation.value_too_long" and issue.blocking for issue in report.issues)
 
 
 def test_empty_workbook_and_template_without_placeholders_are_reported(tmp_path):
@@ -135,8 +135,8 @@ def test_empty_workbook_and_template_without_placeholders_are_reported(tmp_path)
     report = validate_preflight(workbook, template, mappings, destination)
 
     assert {issue.code for issue in report.issues} >= {
-        "no_recipients",
-        "no_placeholders",
+        "validation.no_recipients",
+        "validation.no_placeholders",
     }
 
 
@@ -149,7 +149,7 @@ def test_full_name_fixed_value_collision_is_reported(tmp_path):
 
     report = validate_preflight(workbook, template, mappings, destination)
 
-    assert any(issue.code == "duplicate_output_filename" for issue in report.issues)
+    assert any(issue.code == "validation.duplicate_output_filename" for issue in report.issues)
 
 
 def test_filename_falls_back_to_source_row_without_full_name_placeholder(tmp_path):
@@ -172,7 +172,7 @@ def test_destination_that_is_a_file_is_rejected(tmp_path):
 
     report = validate_preflight(workbook, template, mappings, destination)
 
-    assert any(issue.code == "destination_not_directory" for issue in report.issues)
+    assert any(issue.code == "validation.destination_not_directory" for issue in report.issues)
 
 
 def test_destination_cannot_be_a_source_file(tmp_path):
@@ -180,4 +180,4 @@ def test_destination_cannot_be_a_source_file(tmp_path):
 
     report = validate_preflight(workbook, template, mappings, workbook.path)
 
-    assert any(issue.code == "destination_is_source" for issue in report.issues)
+    assert any(issue.code == "validation.destination_is_source" for issue in report.issues)

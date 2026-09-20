@@ -37,9 +37,9 @@ def _context(tmp_path):
             Issue(
                 Severity.WARNING,
                 "workbook",
-                "A <value> needs review & approval.",
-                code="review_value",
-                row_number=2,
+                "validation.review_value",
+                {"value": "A <value>"},
+                row_id="row-2",
             ),
         ),
     )
@@ -71,6 +71,14 @@ def test_manifest_contains_sources_mappings_outputs_and_status(tmp_path):
         context.outputs[0].pdf_path
     )
     assert "recipient_values" not in payload
+    assert payload["warnings"][0] == {
+        "code": "validation.review_value",
+        "source": "workbook",
+        "row_id": "row-2",
+        "column_id": None,
+        "parameters": {"value": "A <value>"},
+    }
+    assert "message" not in payload["warnings"][0]
 
 
 def test_manifest_write_is_atomic_and_leaves_no_temporary_file(tmp_path):
@@ -85,7 +93,7 @@ def test_manifest_write_is_atomic_and_leaves_no_temporary_file(tmp_path):
 def test_html_summary_escapes_user_controlled_content(tmp_path):
     destination = tmp_path / "batch_summary.html"
 
-    write_summary(_context(tmp_path), destination)
+    write_summary(_context(tmp_path), destination, locale="en")
     content = destination.read_text("utf-8")
 
     assert "A &lt;value&gt; needs review &amp; approval." in content

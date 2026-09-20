@@ -104,9 +104,9 @@ def test_errors_are_visible_and_disable_preview_and_generation(qtbot, tmp_path):
     issue = Issue(
         Severity.ERROR,
         "workbook",
-        "Row 2 is missing the recipient name.",
-        code="blank_mapped_value",
-        row_number=2,
+        "validation.blank_mapped_value",
+        {"row": 2, "placeholder": "FULL_NAME"},
+        row_id="source-row-2",
     )
     services, _, _ = _services(tmp_path, issues=(issue,))
     window = MainWindow(services)
@@ -114,7 +114,7 @@ def test_errors_are_visible_and_disable_preview_and_generation(qtbot, tmp_path):
 
     _advance_to_validation(qtbot, window, tmp_path)
 
-    assert "Row 2 is missing" in window.validation_page.issue_text.toPlainText()
+    assert "Row 2 has no value" in window.validation_page.issue_text.toPlainText()
     assert window.validation_page.generate_allowed is False
     assert not window.validation_page.preview_button.isEnabled()
     assert not window.validation_page.generate_button.isEnabled()

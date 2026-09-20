@@ -19,13 +19,21 @@ class Severity(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class Issue:
-    """A user-facing validation or processing issue."""
+    """A language-neutral validation or processing issue."""
 
     severity: Severity
     source: str
-    message: str
-    code: str = ""
-    row_number: int | None = None
+    code: str
+    parameters: Mapping[str, str | int] = field(default_factory=dict)
+    row_id: str | None = None
+    column_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "parameters",
+            MappingProxyType(dict(self.parameters)),
+        )
 
     @property
     def blocking(self) -> bool:
@@ -62,4 +70,3 @@ class BatchResult:
     output_dir: Path | None = None
     generated_count: int = 0
     issues: tuple[Issue, ...] = field(default_factory=tuple)
-

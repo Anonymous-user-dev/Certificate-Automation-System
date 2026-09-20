@@ -53,15 +53,12 @@ def validate_preflight(
     destination = Path(destination)
 
     if not workbook.recipients:
-        issues.append(
-            _error("no_recipients", "workbook", "The worksheet has no recipient rows.")
-        )
+        issues.append(_error("validation.no_recipients", "workbook"))
     if not template.placeholders:
         issues.append(
             _error(
-                "no_placeholders",
+                "validation.no_placeholders",
                 "template",
-                "The Word template does not contain any {{PLACEHOLDER}} fields.",
             )
         )
 
@@ -74,18 +71,18 @@ def validate_preflight(
         if column is None and (fixed_value is None or not fixed_value.strip()):
             issues.append(
                 _error(
-                    "unresolved_placeholder",
+                    "validation.unresolved_placeholder",
                     "mapping",
-                    f"Choose an Excel column or fixed value for {{{{{placeholder}}}}}.",
+                    {"placeholder": placeholder},
                 )
             )
             continue
         if column is not None and column not in header_names:
             issues.append(
                 _error(
-                    "unknown_workbook_column",
+                    "validation.unknown_workbook_column",
                     "mapping",
-                    f"The mapped Excel column '{column}' does not exist.",
+                    {"column": column},
                 )
             )
             continue
@@ -95,9 +92,9 @@ def validate_preflight(
         if placeholder not in placeholder_names:
             issues.append(
                 _error(
-                    "mapping_not_in_template",
+                    "validation.mapping_not_in_template",
                     "mapping",
-                    f"The mapping for {{{{{placeholder}}}}} is not used by the template.",
+                    {"placeholder": placeholder},
                 )
             )
 
@@ -126,21 +123,23 @@ def validate_preflight(
                 record_is_complete = False
                 issues.append(
                     _error(
-                        "blank_mapped_value",
+                        "validation.blank_mapped_value",
                         "workbook",
-                        f"Row {recipient.source_row} has no value for "
-                        f"{{{{{placeholder}}}}}.",
-                        row_number=recipient.source_row,
+                        {"row": recipient.source_row, "placeholder": placeholder},
+                        row_id=f"source-row-{recipient.source_row}",
                     )
                 )
             elif len(value) > MAX_VALUE_LENGTH:
                 issues.append(
                     _error(
-                        "value_too_long",
+                        "validation.value_too_long",
                         "workbook",
-                        f"Row {recipient.source_row} has a value longer than "
-                        f"{MAX_VALUE_LENGTH} characters for {{{{{placeholder}}}}}.",
-                        row_number=recipient.source_row,
+                        {
+                            "row": recipient.source_row,
+                            "maximum": MAX_VALUE_LENGTH,
+                            "placeholder": placeholder,
+                        },
+                        row_id=f"source-row-{recipient.source_row}",
                     )
                 )
             normalized_record.append(value.casefold())
@@ -150,11 +149,10 @@ def validate_preflight(
             first_row = seen_records[record_key]
             issues.append(
                 _error(
-                    "duplicate_recipient",
+                    "validation.duplicate_recipient",
                     "workbook",
-                    f"Row {recipient.source_row} duplicates the mapped values from "
-                    f"row {first_row}.",
-                    row_number=recipient.source_row,
+                    {"row": recipient.source_row, "first_row": first_row},
+                    row_id=f"source-row-{recipient.source_row}",
                 )
             )
         elif record_is_complete:
@@ -172,11 +170,14 @@ def validate_preflight(
             first_row = seen_filenames[collision_key]
             issues.append(
                 _error(
-                    "duplicate_output_filename",
+                    "validation.duplicate_output_filename",
                     "workbook",
-                    f"Rows {first_row} and {recipient.source_row} would create the "
-                    f"same output filename '{stem}'.",
-                    row_number=recipient.source_row,
+                    {
+                        "first_row": first_row,
+                        "row": recipient.source_row,
+                        "filename": stem,
+                    },
+                    row_id=f"source-row-{recipient.source_row}",
                 )
             )
         else:
@@ -216,17 +217,15 @@ def _validate_destination(
     if any(resolved_destination == path.resolve() for path in source_paths):
         return [
             _error(
-                "destination_is_source",
+                "validation.destination_is_source",
                 "destination",
-                "The output destination cannot be the Excel file or Word template.",
             )
         ]
     if destination.exists() and not destination.is_dir():
         return [
             _error(
-                "destination_not_directory",
+                "validation.destination_not_directory",
                 "destination",
-                "Choose a folder for generated certificate batches.",
             )
         ]
 
@@ -243,9 +242,8 @@ def _validate_destination(
     except OSError:
         issues.append(
             _error(
-                "destination_not_writable",
+                "validation.destination_not_writable",
                 "destination",
-                "The selected output folder is not writable.",
             )
         )
         return issues
@@ -257,17 +255,15 @@ def _validate_destination(
             Issue(
                 Severity.WARNING,
                 "destination",
-                "Available disk space could not be checked.",
-                code="disk_space_unknown",
+                "validation.disk_space_unknown",
             )
         )
     else:
         if free_bytes < estimated_bytes:
             issues.append(
                 _error(
-                    "insufficient_disk_space",
+                    "validation.insufficient_disk_space",
                     "destination",
-                    "The selected drive does not have enough free space for this batch.",
                 )
             )
     return issues
@@ -276,14 +272,16 @@ def _validate_destination(
 def _error(
     code: str,
     source: str,
-    message: str,
+    parameters: Mapping[str, str | int] | None = None,
     *,
-    row_number: int | None = None,
+    row_id: str | None = None,
+    column_id: str | None = None,
 ) -> Issue:
     return Issue(
         Severity.ERROR,
         source,
-        message,
-        code=code,
-        row_number=row_number,
+        code,
+        parameters or {},
+        row_id=row_id,
+        column_id=column_id,
     )

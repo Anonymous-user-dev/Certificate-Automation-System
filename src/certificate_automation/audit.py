@@ -13,6 +13,7 @@ from typing import Mapping
 from uuid import uuid4
 
 from certificate_automation.domain import Issue
+from certificate_automation.i18n import CatalogSet, package_root
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +40,7 @@ class AuditContext:
     mappings: Mapping[str, str | None]
     outputs: tuple[AuditOutput, ...]
     warnings: tuple[Issue, ...] = field(default_factory=tuple)
+    locale: str = "en"
 
 
 def sha256_file(path: Path) -> str:
@@ -59,6 +61,7 @@ def write_manifest(context: AuditContext, destination: Path) -> Path:
         "batch_id": context.batch_id,
         "application_version": context.application_version,
         "status": context.status,
+        "locale": context.locale,
         "started_at": context.started_at.isoformat(),
         "completed_at": context.completed_at.isoformat(),
         "worksheet": context.worksheet,
@@ -77,8 +80,9 @@ def write_manifest(context: AuditContext, destination: Path) -> Path:
             {
                 "code": issue.code,
                 "source": issue.source,
-                "row_number": issue.row_number,
-                "message": issue.message,
+                "row_id": issue.row_id,
+                "column_id": issue.column_id,
+                "parameters": dict(issue.parameters),
             }
             for issue in context.warnings
         ],
@@ -99,16 +103,24 @@ def write_manifest(context: AuditContext, destination: Path) -> Path:
     )
 
 
-def write_summary(context: AuditContext, destination: Path) -> Path:
+def write_summary(
+    context: AuditContext,
+    destination: Path,
+    *,
+    locale: str | None = None,
+) -> Path:
     """Write an escaped offline HTML summary intended for office staff."""
 
+    catalogs = CatalogSet.load(package_root(), locale or context.locale)
     mapping_rows = "".join(
-        f"<tr><td>{escape(placeholder)}</td><td>{escape(column or 'Fixed value')}</td></tr>"
+        f"<tr><td>{escape(placeholder)}</td><td>"
+        f"{escape(column or catalogs.text('summary.fixed_value'))}</td></tr>"
         for placeholder, column in context.mappings.items()
     )
     warning_items = "".join(
-        f"<li>{escape(issue.message)}</li>" for issue in context.warnings
-    ) or "<li>None</li>"
+        f"<li>{escape(catalogs.text(issue.code, **dict(issue.parameters)))}</li>"
+        for issue in context.warnings
+    ) or f"<li>{escape(catalogs.text('summary.none'))}</li>"
     output_rows = "".join(
         "<tr>"
         f"<td>{output.source_row}</td>"
@@ -118,10 +130,10 @@ def write_summary(context: AuditContext, destination: Path) -> Path:
         for output in context.outputs
     )
     content = f"""<!doctype html>
-<html lang="en">
+<html lang="{escape(catalogs.locale)}">
 <head>
   <meta charset="utf-8">
-  <title>Certificate Batch {escape(context.batch_id)}</title>
+  <title>{escape(catalogs.text('summary.document_title', batch_id=context.batch_id))}</title>
   <style>
     body {{ font-family: Segoe UI, sans-serif; margin: 2rem; color: #1f2937; }}
     table {{ border-collapse: collapse; width: 100%; margin: 1rem 0 2rem; }}
@@ -131,21 +143,21 @@ def write_summary(context: AuditContext, destination: Path) -> Path:
   </style>
 </head>
 <body>
-  <h1>Certificate batch summary</h1>
-  <p class="status">Status: {escape(context.status.title())}</p>
+  <h1>{escape(catalogs.text('summary.title'))}</h1>
+  <p class="status">{escape(catalogs.text('summary.status'))}: {escape(context.status.title())}</p>
   <dl>
-    <dt>Batch ID</dt><dd>{escape(context.batch_id)}</dd>
-    <dt>Workbook</dt><dd>{escape(context.workbook_path.name)}</dd>
-    <dt>Template</dt><dd>{escape(context.template_path.name)}</dd>
-    <dt>Worksheet</dt><dd>{escape(context.worksheet)}</dd>
-    <dt>Recipients</dt><dd>{len(context.outputs)}</dd>
+    <dt>{escape(catalogs.text('summary.batch_id'))}</dt><dd>{escape(context.batch_id)}</dd>
+    <dt>{escape(catalogs.text('summary.workbook'))}</dt><dd>{escape(context.workbook_path.name)}</dd>
+    <dt>{escape(catalogs.text('summary.template'))}</dt><dd>{escape(context.template_path.name)}</dd>
+    <dt>{escape(catalogs.text('summary.worksheet'))}</dt><dd>{escape(context.worksheet)}</dd>
+    <dt>{escape(catalogs.text('summary.recipients'))}</dt><dd>{len(context.outputs)}</dd>
   </dl>
-  <h2>Mappings</h2>
-  <table><thead><tr><th>Placeholder</th><th>Excel column</th></tr></thead>
+  <h2>{escape(catalogs.text('summary.mappings'))}</h2>
+  <table><thead><tr><th>{escape(catalogs.text('summary.placeholder'))}</th><th>{escape(catalogs.text('summary.data_column'))}</th></tr></thead>
     <tbody>{mapping_rows}</tbody></table>
-  <h2>Warnings</h2><ul>{warning_items}</ul>
-  <h2>Generated files</h2>
-  <table><thead><tr><th>Source row</th><th>Word file</th><th>PDF file</th></tr></thead>
+  <h2>{escape(catalogs.text('summary.warnings'))}</h2><ul>{warning_items}</ul>
+  <h2>{escape(catalogs.text('summary.generated_files'))}</h2>
+  <table><thead><tr><th>{escape(catalogs.text('summary.source_row'))}</th><th>{escape(catalogs.text('summary.word_file'))}</th><th>{escape(catalogs.text('summary.pdf_file'))}</th></tr></thead>
     <tbody>{output_rows}</tbody></table>
 </body>
 </html>
