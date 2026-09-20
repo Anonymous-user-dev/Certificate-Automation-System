@@ -79,6 +79,10 @@ def test_success_publishes_complete_timestamped_batch(batch_request):
     assert len(list(result.output_dir.glob("*.pdf"))) == 2
     assert (result.output_dir / "manifest.json").exists()
     assert (result.output_dir / "batch_summary.html").exists()
+    support_log = (result.output_dir / "support.log").read_text("utf-8")
+    assert "status=verified" in support_log
+    assert "Ana García" not in support_log
+    assert "李明" not in support_log
     assert not any(batch_request.destination.glob(".certificate-staging-*"))
 
 

@@ -18,6 +18,7 @@ from certificate_automation.audit import (
     AuditContext,
     AuditOutput,
     write_manifest,
+    write_support_log,
     write_summary,
 )
 from certificate_automation.domain import BatchResult, BatchState, Severity
@@ -226,6 +227,7 @@ class BatchGenerator:
             )
             write_summary(audit_context, staging / "batch_summary.html")
             write_manifest(audit_context, staging / "manifest.json")
+            write_support_log(audit_context, staging / "support.log")
 
             if cancellation.requested:
                 return self._cancel(staging)
@@ -322,6 +324,7 @@ class BatchGenerator:
             return None
         (staging / "manifest.json").unlink(missing_ok=True)
         (staging / "batch_summary.html").unlink(missing_ok=True)
+        (staging / "support.log").unlink(missing_ok=True)
         diagnostic = {
             "batch_id": batch_id,
             "status": "incomplete",

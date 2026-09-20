@@ -35,6 +35,11 @@ def test_corrupt_docx_is_rejected(tmp_path):
         verify_docx(path, set())
 
 
+def test_missing_docx_is_rejected(tmp_path):
+    with pytest.raises(ArtifactVerificationError, match="missing or empty"):
+        verify_docx(tmp_path / "missing.docx", set())
+
+
 def test_valid_pdf_with_nonzero_page_passes(tmp_path):
     path = tmp_path / "valid.pdf"
     writer = PdfWriter()
@@ -72,3 +77,8 @@ def test_non_pdf_file_is_rejected(tmp_path):
 
     with pytest.raises(ArtifactVerificationError, match="valid PDF"):
         verify_pdf(path)
+
+
+def test_missing_pdf_is_rejected(tmp_path):
+    with pytest.raises(ArtifactVerificationError, match="missing or empty"):
+        verify_pdf(tmp_path / "missing.pdf")

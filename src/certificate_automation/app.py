@@ -9,13 +9,14 @@ import shutil
 import sys
 import tempfile
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from certificate_automation.batch import BatchGenerator
 from certificate_automation.filenames import safe_stem
 from certificate_automation.mapping import MappingSelection, suggest_mappings
+from certificate_automation.recovery import RecoveryService
 from certificate_automation.template import (
     TemplateInspection,
     inspect_template,
@@ -75,6 +76,8 @@ class ApplicationServices:
     batch_generator: BatchGenerator
     open_path: Callable[[Path], bool]
     confirm_generation: Callable[[QWidget], bool]
+    recovery: RecoveryService
+    confirm_recovery_removal: Callable[[QWidget, object], bool]
 
 
 def create_default_services() -> ApplicationServices:
@@ -99,6 +102,18 @@ def create_default_services() -> ApplicationServices:
             QMessageBox.StandardButton.No,
         )
         == QMessageBox.StandardButton.Yes,
+        recovery=RecoveryService(),
+        confirm_recovery_removal=lambda parent, record: QMessageBox.question(
+            parent,
+            "Remove incomplete batch?",
+            (
+                f"Remove the incomplete diagnostic batch '{record.batch_id}'? "
+                "This does not affect any published certificate batch."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        == QMessageBox.StandardButton.Yes,
     )
 
 
@@ -110,9 +125,10 @@ def main() -> int:
 
     window = MainWindow(create_default_services())
     window.show()
+    if "--smoke-test" in sys.argv:
+        QTimer.singleShot(250, application.quit)
     return application.exec()
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -153,6 +153,27 @@ def write_summary(context: AuditContext, destination: Path) -> Path:
     return _atomic_write_text(Path(destination), content)
 
 
+def write_support_log(context: AuditContext, destination: Path) -> Path:
+    """Write operational facts without recipient values or output filenames."""
+
+    warning_codes = ",".join(
+        issue.code or "unspecified_warning" for issue in context.warnings
+    ) or "none"
+    lines = [
+        "certificate_automation_support_log=1",
+        f"batch_id={context.batch_id}",
+        f"application_version={context.application_version}",
+        f"status={context.status}",
+        f"started_at={context.started_at.isoformat()}",
+        f"completed_at={context.completed_at.isoformat()}",
+        f"worksheet={context.worksheet}",
+        f"recipient_count={len(context.outputs)}",
+        f"warning_count={len(context.warnings)}",
+        f"warning_codes={warning_codes}",
+    ]
+    return _atomic_write_text(Path(destination), "\n".join(lines) + "\n")
+
+
 def _source_record(path: Path) -> dict[str, str]:
     return {"filename": path.name, "sha256": sha256_file(path)}
 
@@ -171,4 +192,3 @@ def _atomic_write_text(destination: Path, content: str) -> Path:
     finally:
         temporary.unlink(missing_ok=True)
     return destination
-

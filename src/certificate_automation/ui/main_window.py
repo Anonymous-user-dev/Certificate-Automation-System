@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QThread
+from PySide6.QtCore import QThread, QTimer
 from PySide6.QtWidgets import QLabel, QMainWindow, QStackedWidget, QVBoxLayout, QWidget
 
 from certificate_automation.batch import BatchRequest, CancellationToken
@@ -52,8 +52,12 @@ class MainWindow(QMainWindow):
         self._success_callback = None
         self._failure_callback = None
         self.cancellation: CancellationToken | None = None
+        self._close_when_idle = False
 
         self.files_page.workbook_selected.connect(self._request_worksheets)
+        self.files_page.destination_selected.connect(self._check_recovery)
+        self.files_page.view_recovery_requested.connect(self._view_recovery)
+        self.files_page.remove_recovery_requested.connect(self._remove_recovery)
         self.files_page.continue_requested.connect(self._load_inputs)
         self.mapping_page.back_requested.connect(
             lambda: self.stack.setCurrentWidget(self.files_page)
@@ -204,6 +208,25 @@ class MainWindow(QMainWindow):
                 "Cancellation requested. Finishing the current document safely…"
             )
 
+    def _check_recovery(self, value: str) -> None:
+        records = self.services.recovery.find_incomplete(Path(value)) if value else ()
+        self.files_page.set_incomplete_batches(records)
+
+    def _view_recovery(self) -> None:
+        records = getattr(self.files_page, "incomplete_batches", ())
+        if records and records[0].diagnostic_path.is_file():
+            self.services.open_path(records[0].diagnostic_path)
+
+    def _remove_recovery(self) -> None:
+        records = getattr(self.files_page, "incomplete_batches", ())
+        if not records:
+            return
+        record = records[0]
+        if not self.services.confirm_recovery_removal(self, record):
+            return
+        self.services.recovery.remove(record)
+        self._check_recovery(str(record.path.parent))
+
     def _start_operation(self, operation, success, failure) -> None:
         if self._thread is not None:
             return
@@ -242,7 +265,19 @@ class MainWindow(QMainWindow):
         self._success_callback = None
         self._failure_callback = None
         self._set_pages_enabled(True)
+        if self._close_when_idle:
+            self._close_when_idle = False
+            QTimer.singleShot(0, self.close)
 
     def _set_pages_enabled(self, enabled: bool) -> None:
         for index in range(self.stack.count()):
             self.stack.widget(index).setEnabled(enabled)
+
+    def closeEvent(self, event) -> None:
+        if self._thread is not None:
+            self._close_when_idle = True
+            if self.cancellation is not None:
+                self._request_cancel()
+            event.ignore()
+            return
+        event.accept()

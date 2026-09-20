@@ -13,6 +13,7 @@ from certificate_automation.domain import (
     Severity,
 )
 from certificate_automation.mapping import MappingSelection, suggest_mappings
+from certificate_automation.recovery import RecoveryService
 from certificate_automation.template import Placeholder, TemplateInspection
 from certificate_automation.ui.main_window import MainWindow
 from certificate_automation.validation import ValidationReport
@@ -61,6 +62,8 @@ def _services(tmp_path, *, issues=()):
         batch_generator=generator,
         open_path=lambda path: opened.append(Path(path)) or True,
         confirm_generation=lambda parent: True,
+        recovery=RecoveryService(),
+        confirm_recovery_removal=lambda parent, record: True,
     ), opened, generator
 
 

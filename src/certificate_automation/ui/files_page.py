@@ -21,6 +21,9 @@ from PySide6.QtWidgets import (
 class FilesPage(QWidget):
     continue_requested = Signal()
     workbook_selected = Signal(str)
+    destination_selected = Signal(str)
+    view_recovery_requested = Signal()
+    remove_recovery_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -38,6 +41,17 @@ class FilesPage(QWidget):
         self.error_label = QLabel()
         self.error_label.setWordWrap(True)
         self.error_label.setAccessibleName("File selection error")
+        self.recovery_panel = QWidget()
+        recovery_layout = QHBoxLayout(self.recovery_panel)
+        recovery_layout.setContentsMargins(0, 0, 0, 0)
+        self.recovery_label = QLabel()
+        self.recovery_label.setWordWrap(True)
+        self.view_recovery_button = QPushButton("View diagnostic")
+        self.remove_recovery_button = QPushButton("Remove incomplete files")
+        recovery_layout.addWidget(self.recovery_label, 1)
+        recovery_layout.addWidget(self.view_recovery_button)
+        recovery_layout.addWidget(self.remove_recovery_button)
+        self.recovery_panel.hide()
         self.continue_button = QPushButton("Continue to field mapping")
         self.continue_button.setEnabled(False)
 
@@ -51,6 +65,7 @@ class FilesPage(QWidget):
         layout.addWidget(description)
         layout.addLayout(form)
         layout.addWidget(self.error_label)
+        layout.addWidget(self.recovery_panel)
         layout.addStretch()
         layout.addWidget(self.continue_button)
 
@@ -65,6 +80,11 @@ class FilesPage(QWidget):
         self.workbook_input.editingFinished.connect(
             lambda: self.workbook_selected.emit(self.workbook_input.text().strip())
         )
+        self.destination_input.editingFinished.connect(
+            lambda: self.destination_selected.emit(self.destination_input.text().strip())
+        )
+        self.view_recovery_button.clicked.connect(self.view_recovery_requested)
+        self.remove_recovery_button.clicked.connect(self.remove_recovery_requested)
 
     def _picker_row(self, field: QLineEdit, kind: str) -> QWidget:
         container = QWidget()
@@ -105,6 +125,8 @@ class FilesPage(QWidget):
         self._settings.setValue(f"recent/{kind}", str(Path(selected).parent))
         if kind == "workbook":
             self.workbook_selected.emit(selected)
+        elif kind == "destination":
+            self.destination_selected.emit(selected)
 
     def set_worksheets(self, names: tuple[str, ...]) -> None:
         current = self.worksheet_combo.currentText()
@@ -116,6 +138,21 @@ class FilesPage(QWidget):
 
     def show_error(self, message: str) -> None:
         self.error_label.setText(f"Error: {message}" if message else "")
+
+    def set_incomplete_batches(self, records) -> None:
+        self.incomplete_batches = tuple(records)
+        if not self.incomplete_batches:
+            self.recovery_label.clear()
+            self.recovery_panel.hide()
+            return
+        first = self.incomplete_batches[0]
+        count = len(self.incomplete_batches)
+        self.recovery_label.setText(
+            f"Recovery notice: found {count} incomplete batch record(s). "
+            f"Current batch ID: {first.batch_id}."
+        )
+        self.view_recovery_button.setEnabled(first.diagnostic_path.is_file())
+        self.recovery_panel.show()
 
     def selected_paths(self) -> tuple[Path, str, Path, Path]:
         return (
@@ -132,4 +169,3 @@ class FilesPage(QWidget):
             and bool(self.destination_input.text().strip())
             and self.worksheet_combo.count() > 0
         )
-
