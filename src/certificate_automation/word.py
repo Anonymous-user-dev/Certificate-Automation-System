@@ -177,7 +177,11 @@ class ComWordGateway:
             )
         return Availability(True, "Microsoft Word automation is available.")
 
-    def convert_once(self, docx_path: Path, pdf_path: Path) -> None:
+    def convert_once(  # pragma: no cover - exercised by Windows Word integration
+        self,
+        docx_path: Path,
+        pdf_path: Path,
+    ) -> None:
         try:
             import pythoncom
             import pywintypes
