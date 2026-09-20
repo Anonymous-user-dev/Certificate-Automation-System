@@ -32,4 +32,6 @@ where = ["src"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-ra"
-
+markers = [
+    "word_integration: requires 64-bit Windows with desktop Microsoft Word",
+]
