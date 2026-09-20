@@ -11,7 +11,8 @@ dependencies = [
     "lxml>=6.0,<7",
     "openpyxl>=3.1,<4",
     "pypdf>=6,<7",
-    "PySide6>=6.8,<7",
+    "PySide6>=6.8,<6.9; python_version < '3.14'",
+    "PySide6>=6.11,<7; python_version >= '3.14'",
     "pywin32>=311; platform_system == 'Windows'",
 ]
 

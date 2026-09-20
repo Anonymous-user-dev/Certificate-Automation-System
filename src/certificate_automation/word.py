@@ -169,11 +169,26 @@ class ComWordGateway:
             )
         try:
             import pythoncom  # noqa: F401
+            import winreg
             import win32com.client  # noqa: F401
         except ImportError:
             return Availability(
                 False,
                 "The Microsoft Word automation component is not installed.",
+            )
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CLASSES_ROOT,
+                r"Word.Application\CLSID",
+            ) as key:
+                clsid, _ = winreg.QueryValueEx(key, None)
+            if not str(clsid).strip():
+                raise OSError("Word.Application has an empty CLSID registration.")
+        except OSError:
+            return Availability(
+                False,
+                "Desktop Microsoft Word is not installed or its automation "
+                "registration is damaged.",
             )
         return Availability(True, "Microsoft Word automation is available.")
 

@@ -19,7 +19,7 @@ Microsoft Word is required for PDF output. The manifest records hashes and proce
 
 ## Development setup
 
-Python 3.12 or newer is required.
+Python 3.12 or newer is required. Python 3.13 with PySide6 6.8 is the supported Windows release-build toolchain.
 
 ```bash
 python -m venv .venv

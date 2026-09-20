@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from collections import deque
+from types import ModuleType
+import sys
 
 import pytest
 
 from certificate_automation.word import (
     Availability,
+    ComWordGateway,
     PdfConversionError,
     PermanentWordError,
     TransientWordError,
@@ -149,3 +152,25 @@ def test_gateway_availability_is_exposed():
 
     assert WordPdfConverter(gateway=gateway).is_available().available is True
 
+
+def test_gateway_reports_when_word_com_registration_is_missing(monkeypatch):
+    pythoncom = ModuleType("pythoncom")
+    win32com = ModuleType("win32com")
+    win32com.client = ModuleType("win32com.client")
+    winreg = ModuleType("winreg")
+    winreg.HKEY_CLASSES_ROOT = object()
+
+    def missing_word(*_args):
+        raise FileNotFoundError("class not registered")
+
+    winreg.OpenKey = missing_word
+    monkeypatch.setitem(sys.modules, "pythoncom", pythoncom)
+    monkeypatch.setitem(sys.modules, "win32com", win32com)
+    monkeypatch.setitem(sys.modules, "win32com.client", win32com.client)
+    monkeypatch.setitem(sys.modules, "winreg", winreg)
+    monkeypatch.setattr("certificate_automation.word.platform.system", lambda: "Windows")
+
+    availability = ComWordGateway().availability()
+
+    assert availability.available is False
+    assert "not installed" in availability.message

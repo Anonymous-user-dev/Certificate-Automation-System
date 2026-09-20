@@ -1,7 +1,7 @@
 from pathlib import Path
 
 
-ROOT = Path(SPECPATH).parent.parent
+ROOT = Path(SPECPATH).parent
 SOURCE = ROOT / "src"
 
 analysis = Analysis(
