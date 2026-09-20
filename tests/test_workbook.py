@@ -72,12 +72,11 @@ def test_dates_and_times_are_stable_iso_strings(xlsx_factory):
     }
 
 
-def test_formula_uses_cached_value_instead_of_formula_text(xlsx_factory):
+def test_formula_without_cached_value_is_rejected(xlsx_factory):
     path = xlsx_factory([["Full Name", "Calculated"], ["Ana", "=1+1"]])
 
-    values = load_workbook_data(path, "Students").recipients[0].values
-
-    assert values["calculated"] == ""
+    with pytest.raises(WorkbookInputError, match="recalculate"):
+        load_workbook_data(path, "Students")
 
 
 def test_duplicate_normalized_headers_are_reported(xlsx_factory):

@@ -72,3 +72,20 @@ def test_validation_page_formats_structured_issue_in_active_locale(qtbot):
 
     assert "В строке 2 нет значения" in page.issue_text.toPlainText()
     assert "Ошибка" in page.issue_text.toPlainText()
+
+
+@pytest.mark.parametrize(
+    ("key", "parameters"),
+    [
+        ("import.excel.unreadable", {"filename": "recipients.xlsx"}),
+        ("import.excel.sheet_missing", {"sheet": "Recipients"}),
+        ("import.excel.formula_cache_missing", {"cell": "B2"}),
+        ("import.excel.merged_data_cells", {"ranges": "A2:B2"}),
+        ("import.excel.blank_header", {"cell": "B1"}),
+        ("import.excel.duplicate_header", {"header": "Full Name"}),
+    ],
+)
+def test_excel_failures_have_complete_offline_translations(key, parameters):
+    for locale in ("en", "zh_CN", "ru"):
+        catalogs = CatalogSet.load(PACKAGE_ROOT, locale=locale)
+        assert catalogs.text(key, **parameters)
