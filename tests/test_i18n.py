@@ -89,3 +89,26 @@ def test_excel_failures_have_complete_offline_translations(key, parameters):
     for locale in ("en", "zh_CN", "ru"):
         catalogs = CatalogSet.load(PACKAGE_ROOT, locale=locale)
         assert catalogs.text(key, **parameters)
+
+
+@pytest.mark.parametrize(
+    ("key", "parameters"),
+    [
+        ("import.delimited.empty", {}),
+        ("import.delimited.nul_byte", {}),
+        ("import.delimited.choice_required", {}),
+        ("import.delimited.decode_failed", {"encoding": "cp1251"}),
+        ("import.delimited.inconsistent_width", {"row": 2, "expected": 2, "actual": 3}),
+        ("import.delimited.blank_header", {"column": 2}),
+        ("import.delimited.duplicate_header", {"header": "Name"}),
+        ("import.delimited.malformed_csv", {}),
+        ("import.clipboard.header_mismatch", {}),
+        ("import.clipboard.mode_required", {}),
+        ("import.manual.blank_header", {}),
+        ("import.manual.duplicate_header", {}),
+        ("import.manual.no_columns", {}),
+    ],
+)
+def test_text_and_manual_import_failures_have_complete_translations(key, parameters):
+    for locale in ("en", "zh_CN", "ru"):
+        assert CatalogSet.load(PACKAGE_ROOT, locale).text(key, **parameters)
