@@ -9,13 +9,22 @@ import shutil
 import sys
 import tempfile
 
-from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtCore import QSettings, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from certificate_automation.batch import BatchGenerator
 from certificate_automation.filenames import safe_stem
+from certificate_automation.i18n import CatalogSet, package_root
+from certificate_automation.importers.clipboard import (
+    create_manual_dataset,
+    import_clipboard,
+    inspect_clipboard,
+)
+from certificate_automation.importers.delimited import import_delimited, inspect_delimited
+from certificate_automation.importers.excel import import_excel, inspect_excel
 from certificate_automation.mapping import MappingSelection, suggest_mappings
+from certificate_automation.project import ProjectStore
 from certificate_automation.recovery import RecoveryService
 from certificate_automation.template import (
     TemplateInspection,
@@ -78,9 +87,18 @@ class ApplicationServices:
     confirm_generation: Callable[[QWidget], bool]
     recovery: RecoveryService
     confirm_recovery_removal: Callable[[QWidget, object], bool]
+    catalogs: CatalogSet | None = None
+    inspect_excel: Callable | None = None
+    import_excel: Callable | None = None
+    inspect_delimited: Callable | None = None
+    import_delimited: Callable | None = None
+    inspect_clipboard: Callable | None = None
+    import_clipboard: Callable | None = None
+    create_manual_dataset: Callable | None = None
+    open_project: Callable[[Path], ProjectStore] | None = None
 
 
-def create_default_services() -> ApplicationServices:
+def create_default_services(locale: str = "en") -> ApplicationServices:
     converter = WordPdfConverter()
     preview_generator = PreviewGenerator(converter)
     return ApplicationServices(
@@ -114,6 +132,15 @@ def create_default_services() -> ApplicationServices:
             QMessageBox.StandardButton.No,
         )
         == QMessageBox.StandardButton.Yes,
+        catalogs=CatalogSet.load(package_root(), locale),
+        inspect_excel=inspect_excel,
+        import_excel=import_excel,
+        inspect_delimited=inspect_delimited,
+        import_delimited=import_delimited,
+        inspect_clipboard=inspect_clipboard,
+        import_clipboard=import_clipboard,
+        create_manual_dataset=create_manual_dataset,
+        open_project=ProjectStore.open,
     )
 
 
@@ -121,9 +148,11 @@ def main() -> int:
     application = QApplication.instance() or QApplication(sys.argv)
     application.setOrganizationName("Certificate Automation")
     application.setApplicationName("Certificate Automation")
-    from certificate_automation.ui.main_window import MainWindow
+    settings = QSettings()
+    locale = str(settings.value("locale", "en"))
+    from certificate_automation.ui.workspace import WorkspaceWindow
 
-    window = MainWindow(create_default_services())
+    window = WorkspaceWindow(create_default_services(locale), settings=settings)
     window.show()
     if "--smoke-test" in sys.argv:
         QTimer.singleShot(250, application.quit)

@@ -281,3 +281,11 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         event.accept()
+
+
+# The original wizard remains available for compatibility tests and staged
+# migration. Public callers receive the new operator workspace.
+LegacyMainWindow = MainWindow
+from certificate_automation.ui.workspace import WorkspaceWindow  # noqa: E402
+
+MainWindow = WorkspaceWindow

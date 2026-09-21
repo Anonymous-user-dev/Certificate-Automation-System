@@ -15,7 +15,7 @@ from certificate_automation.domain import (
 from certificate_automation.mapping import MappingSelection, suggest_mappings
 from certificate_automation.recovery import RecoveryService
 from certificate_automation.template import Placeholder, TemplateInspection
-from certificate_automation.ui.main_window import MainWindow
+from certificate_automation.ui.main_window import LegacyMainWindow as MainWindow
 from certificate_automation.validation import ValidationReport
 from certificate_automation.workbook import WorkbookData
 

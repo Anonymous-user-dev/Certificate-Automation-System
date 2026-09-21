@@ -11,7 +11,7 @@ from certificate_automation.domain import BatchResult, BatchState, Recipient
 from certificate_automation.mapping import MappingSelection
 from certificate_automation.recovery import DraftProjectBackup, IncompleteBatch, RecoveryService
 from certificate_automation.template import Placeholder, TemplateInspection
-from certificate_automation.ui.main_window import MainWindow
+from certificate_automation.ui.main_window import LegacyMainWindow as MainWindow
 from certificate_automation.validation import ValidationReport
 from certificate_automation.word import Availability
 from certificate_automation.workbook import WorkbookData
