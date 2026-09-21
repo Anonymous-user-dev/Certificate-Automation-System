@@ -51,6 +51,12 @@ class OutputOptions:
             "row_ids": list(self.row_ids),
         }
 
+    @property
+    def order(self) -> tuple[str, ...]:
+        """Public generation-order alias used by the operator workflow."""
+
+        return self.row_ids
+
     @classmethod
     def from_json(cls, value: dict[str, object]) -> "OutputOptions":
         return cls(

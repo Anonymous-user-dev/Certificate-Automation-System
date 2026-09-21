@@ -163,8 +163,23 @@ def test_project_failures_have_complete_offline_translations(key):
         ("output.reserved_filename", {"filename": "CON"}),
         ("output.path_too_long", {"filename": "certificate"}),
         ("output.filename_collision", {"filename": "Ana"}),
+        ("output.combined_pdf_empty", {}),
+        ("output.combined_pdf_overwrites_source", {}),
+        ("output.combined_pdf_input_invalid", {}),
+        ("output.combined_pdf_page_count_mismatch", {}),
+        ("output.combined_pdf_failed", {}),
+        ("output.combined_pdf_verification_failed", {}),
+        ("output.combined_pdf_destination_exists", {}),
+        ("output.artifact_changed", {}),
     ],
 )
 def test_mapping_and_output_failures_have_complete_offline_translations(key, parameters):
     for locale in ("en", "zh_CN", "ru"):
         assert CatalogSet.load(PACKAGE_ROOT, locale).text(key, **parameters)
+
+
+def test_changed_template_during_generation_has_complete_offline_translations():
+    for locale in ("en", "zh_CN", "ru"):
+        assert CatalogSet.load(PACKAGE_ROOT, locale).text(
+            "template.changed_during_generation"
+        )

@@ -83,3 +83,32 @@ def verify_pdf(path: Path) -> None:
         raise ArtifactVerificationError(
             f"File '{path.name}' is not a valid PDF and could not be verified."
         ) from error
+
+
+def verify_pdf_page_count(path: Path, expected_pages: int) -> int:
+    """Reopen a PDF and require the exact expected page count."""
+
+    verify_pdf(path)
+    try:
+        actual_pages = len(PdfReader(Path(path), strict=True).pages)
+    except Exception as error:
+        raise ArtifactVerificationError(
+            f"PDF '{Path(path).name}' page count could not be verified."
+        ) from error
+    if actual_pages != expected_pages:
+        raise ArtifactVerificationError(
+            f"PDF '{Path(path).name}' has {actual_pages} pages; expected {expected_pages}."
+        )
+    return actual_pages
+
+
+def pdf_page_count(path: Path) -> int:
+    """Return the page count only after the PDF passes strict verification."""
+
+    verify_pdf(path)
+    try:
+        return len(PdfReader(Path(path), strict=True).pages)
+    except Exception as error:
+        raise ArtifactVerificationError(
+            f"PDF '{Path(path).name}' page count could not be read."
+        ) from error

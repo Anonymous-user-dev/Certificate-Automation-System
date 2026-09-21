@@ -16,16 +16,31 @@ from uuid import uuid4
 from certificate_automation import __version__
 from certificate_automation.audit import (
     AuditContext,
+    CombinedAuditOutput,
     AuditOutput,
+    sha256_file,
     write_manifest,
     write_support_log,
     write_summary,
 )
+from certificate_automation.dataset import TabularDataset
 from certificate_automation.domain import BatchResult, BatchState, Severity
-from certificate_automation.mapping import MappingSelection
+from certificate_automation.mapping import MappingPlan, MappingSelection, evaluate_plan
+from certificate_automation.output_options import OutputOptions
+from certificate_automation.pdf_merge import (
+    CombinedPdfError,
+    CombinedPdfRecord,
+    merge_verified_pdfs,
+)
 from certificate_automation.template import TemplateInspection, render_template
 from certificate_automation.validation import validate_preflight
-from certificate_automation.verification import verify_docx, verify_pdf
+from certificate_automation.verification import (
+    ArtifactVerificationError,
+    pdf_page_count,
+    verify_docx,
+    verify_pdf,
+    verify_pdf_page_count,
+)
 from certificate_automation.word import PdfConversionError, PdfConverter
 from certificate_automation.workbook import WorkbookData
 
@@ -33,12 +48,41 @@ from certificate_automation.workbook import WorkbookData
 ProgressCallback = Callable[["ProgressEvent"], None]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class BatchRequest:
-    workbook: WorkbookData
+    dataset: WorkbookData | TabularDataset
     template: TemplateInspection
-    mappings: MappingSelection
-    destination: Path
+    mappings: MappingSelection | MappingPlan
+    outputs: Path | OutputOptions
+    locale: str
+
+    def __init__(
+        self,
+        dataset: WorkbookData | TabularDataset,
+        template: TemplateInspection,
+        mappings: MappingSelection | MappingPlan,
+        outputs: Path | OutputOptions,
+        locale: str = "en",
+    ) -> None:
+        object.__setattr__(self, "dataset", dataset)
+        object.__setattr__(self, "template", template)
+        object.__setattr__(self, "mappings", mappings)
+        object.__setattr__(self, "outputs", outputs)
+        object.__setattr__(self, "locale", locale)
+
+    @property
+    def workbook(self) -> WorkbookData | TabularDataset:
+        """Compatibility alias while the original generator remains supported."""
+
+        return self.dataset
+
+    @property
+    def destination(self) -> Path:
+        return (
+            self.outputs.destination
+            if isinstance(self.outputs, OutputOptions)
+            else Path(self.outputs)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +145,12 @@ class BatchGenerator:
         progress: ProgressCallback | None = None,
         cancellation: CancellationToken | None = None,
     ) -> BatchResult:
+        if isinstance(request.dataset, TabularDataset):
+            if not isinstance(request.mappings, MappingPlan) or not isinstance(
+                request.outputs, OutputOptions
+            ):
+                raise TypeError("TabularDataset generation requires typed mappings and outputs")
+            return self._generate_typed(request, progress, cancellation)
         cancellation = cancellation or CancellationToken()
         started_at = self._clock()
         batch_id = self._batch_id_factory()
@@ -271,6 +321,312 @@ class BatchGenerator:
                 diagnostic_path=diagnostic_path,
                 user_action=user_action,
             ) from error
+
+    def _generate_typed(
+        self,
+        request: BatchRequest,
+        progress: ProgressCallback | None,
+        cancellation: CancellationToken | None,
+    ) -> BatchResult:
+        dataset = request.dataset
+        plan = request.mappings
+        outputs = request.outputs
+        assert isinstance(dataset, TabularDataset)
+        assert isinstance(plan, MappingPlan)
+        assert isinstance(outputs, OutputOptions)
+
+        cancellation = cancellation or CancellationToken()
+        started_at = self._clock()
+        batch_id = self._batch_id_factory()
+        destination = outputs.destination
+        total = len(outputs.row_ids)
+        self._emit(progress, "preflight", 0, 1, "Validating the complete batch.")
+        if cancellation.requested:
+            return BatchResult(BatchState.CANCELLED)
+
+        report = validate_preflight(dataset, request.template, plan, outputs)
+        if not report.ready:
+            raise BatchGenerationError(
+                "The batch did not pass validation.",
+                code="validation_failed",
+                user_action="Correct every validation error before generating documents.",
+            )
+
+        needs_pdf = outputs.individual_pdf or outputs.combined_pdf
+        if needs_pdf:
+            availability = self._converter.is_available()
+            if not availability.available:
+                raise BatchGenerationError(
+                    availability.message,
+                    code="pdf_converter_unavailable",
+                    user_action="Install or repair desktop Microsoft Word, then validate again.",
+                )
+
+        destination.mkdir(parents=True, exist_ok=True)
+        final_directory = destination / self._published_folder_name(batch_id)
+        incomplete_directory = destination / f".certificate-incomplete-{batch_id}"
+        if final_directory.exists() or incomplete_directory.exists():
+            raise BatchGenerationError(
+                "A batch with this identifier already exists and was not overwritten.",
+                code="batch_already_exists",
+                user_action="Start a new generation run to receive a new batch identifier.",
+            )
+        staging = destination / f".certificate-staging-{batch_id}"
+        if staging.exists():
+            raise BatchGenerationError(
+                "A staging folder with this batch identifier already exists.",
+                code="staging_already_exists",
+            )
+        staging.mkdir()
+
+        docx_by_row: dict[str, Path] = {}
+        pdf_by_row: dict[str, Path] = {}
+        page_counts: dict[str, int] = {}
+        combined: CombinedPdfRecord | None = None
+        try:
+            for index, row_id in enumerate(outputs.row_ids, start=1):
+                if cancellation.requested:
+                    return self._cancel(staging)
+                self._require_template_hash(
+                    request.template.path,
+                    report.template_sha256,
+                )
+                stem = report.filename_stems[row_id]
+                docx_path = staging / f"{stem}.docx"
+                render_template(
+                    request.template.path,
+                    docx_path,
+                    evaluate_plan(plan, dataset, row_id),
+                )
+                verify_docx(docx_path, set(request.template.names))
+                docx_by_row[row_id] = docx_path
+                self._emit(
+                    progress,
+                    "docx",
+                    index,
+                    total,
+                    f"Created Word certificate {index} of {total}.",
+                    dataset.row(row_id).source_row,
+                )
+
+            if needs_pdf:
+                for index, row_id in enumerate(outputs.row_ids, start=1):
+                    if cancellation.requested:
+                        return self._cancel(staging)
+                    pdf_path = docx_by_row[row_id].with_suffix(".pdf")
+                    self._converter.convert(docx_by_row[row_id], pdf_path)
+                    page_counts[row_id] = pdf_page_count(pdf_path)
+                    pdf_by_row[row_id] = pdf_path
+                    self._emit(
+                        progress,
+                        "pdf",
+                        index,
+                        total,
+                        f"Created PDF certificate {index} of {total}.",
+                        dataset.row(row_id).source_row,
+                    )
+
+            if outputs.combined_pdf:
+                combined = merge_verified_pdfs(
+                    tuple(pdf_by_row[row_id] for row_id in outputs.row_ids),
+                    staging / f"{outputs.batch_name}.pdf",
+                )
+                expected_pages = sum(page_counts.values())
+                try:
+                    verify_pdf_page_count(combined.path, expected_pages)
+                except ArtifactVerificationError as error:
+                    raise BatchGenerationError(
+                        "The combined PDF did not match its verified inputs.",
+                        code="output.combined_pdf_verification_failed",
+                    ) from error
+                if combined.page_count != expected_pages:
+                    raise BatchGenerationError(
+                        "The combined PDF page count did not match its verified inputs.",
+                        code="output.combined_pdf_verification_failed",
+                    )
+                self._emit(
+                    progress,
+                    "combined_pdf",
+                    total,
+                    total,
+                    "Created and verified the combined print PDF.",
+                )
+
+            if cancellation.requested:
+                return self._cancel(staging)
+            self._require_template_hash(
+                request.template.path,
+                report.template_sha256,
+            )
+
+            audit_outputs = tuple(
+                AuditOutput(
+                    dataset.row(row_id).source_row,
+                    docx_by_row[row_id] if outputs.docx else None,
+                    pdf_by_row.get(row_id) if outputs.individual_pdf else None,
+                    row_id,
+                )
+                for row_id in outputs.row_ids
+            )
+            combined_audit = (
+                CombinedAuditOutput(
+                    combined.path,
+                    combined.page_count,
+                    sha256_file(combined.path),
+                    outputs.row_ids,
+                )
+                if combined is not None
+                else None
+            )
+            completed_at = self._clock()
+            selected_options = {
+                "docx": outputs.docx,
+                "individual_pdf": outputs.individual_pdf,
+                "combined_pdf": outputs.combined_pdf,
+                "batch_name": outputs.batch_name,
+            }
+            audit_context = AuditContext(
+                batch_id=batch_id,
+                application_version=__version__,
+                started_at=started_at,
+                completed_at=completed_at,
+                status="verified",
+                workbook_path=dataset.source.path,
+                template_path=request.template.path,
+                worksheet=str(dataset.source.options.get("sheet_name", "")) or None,
+                mappings=plan.to_json(),
+                outputs=audit_outputs,
+                warnings=tuple(
+                    issue for issue in report.issues if issue.severity is Severity.WARNING
+                ),
+                locale=request.locale,
+                source_kind=dataset.source.kind,
+                source_label=dataset.source.label,
+                source_sha256=dataset.source.sha256,
+                dataset_revision=dataset.revision,
+                dataset_sha256=dataset.canonical_sha256(),
+                selected_outputs=selected_options,
+                ordered_row_ids=outputs.row_ids,
+                combined_pdf=combined_audit,
+            )
+            write_summary(
+                audit_context,
+                staging / "batch_summary.html",
+                locale=request.locale,
+            )
+            write_manifest(audit_context, staging / "manifest.json")
+            write_support_log(audit_context, staging / "support.log")
+
+            if not outputs.docx:
+                for path in docx_by_row.values():
+                    path.unlink()
+            if not outputs.individual_pdf:
+                for path in pdf_by_row.values():
+                    path.unlink()
+
+            selected_artifacts = tuple(
+                path
+                for paths in (
+                    tuple(docx_by_row.values()) if outputs.docx else (),
+                    tuple(pdf_by_row.values()) if outputs.individual_pdf else (),
+                    (combined.path,) if combined is not None else (),
+                )
+                for path in paths
+            )
+            expected_hashes = {path: sha256_file(path) for path in selected_artifacts}
+            self._verify_selected_artifacts(
+                selected_artifacts,
+                expected_hashes,
+                combined,
+                sum(page_counts.values()),
+            )
+            self._emit(
+                progress,
+                "verification",
+                total,
+                total,
+                "Verified every selected output artifact.",
+            )
+            if cancellation.requested:
+                return self._cancel(staging)
+            if final_directory.exists():
+                raise BatchGenerationError(
+                    "The final batch folder appeared during generation and was not overwritten.",
+                    code="batch_already_exists",
+                )
+            os.replace(staging, final_directory)
+            self._emit(
+                progress,
+                "publication",
+                total,
+                total,
+                "Published the complete verified batch.",
+            )
+            return BatchResult(
+                BatchState.PUBLISHED,
+                output_dir=final_directory,
+                generated_count=total,
+                issues=report.issues,
+            )
+        except Exception as error:
+            diagnostic_path = self._retain_incomplete(staging, batch_id, error)
+            if isinstance(error, BatchGenerationError):
+                error.diagnostic_path = diagnostic_path
+                raise
+            code = (
+                "output.combined_pdf_verification_failed"
+                if isinstance(error, CombinedPdfError)
+                else error.code
+                if isinstance(error, PdfConversionError)
+                else "generation_failed"
+            )
+            raise BatchGenerationError(
+                "The batch could not be completed safely. No official batch was published.",
+                code=code,
+                diagnostic_path=diagnostic_path,
+                user_action="Review the diagnostic report, correct the source files, and try again.",
+            ) from error
+
+    @staticmethod
+    def _verify_selected_artifacts(
+        paths: tuple[Path, ...],
+        expected_hashes: dict[Path, str],
+        combined: CombinedPdfRecord | None,
+        combined_expected_pages: int,
+    ) -> None:
+        for path in paths:
+            if path.suffix.casefold() == ".docx":
+                verify_docx(path, set())
+            elif path.suffix.casefold() == ".pdf":
+                verify_pdf(path)
+            if sha256_file(path) != expected_hashes[path]:
+                raise BatchGenerationError(
+                    "A selected output changed before publication.",
+                    code="output.artifact_changed",
+                )
+        if combined is not None:
+            try:
+                verify_pdf_page_count(combined.path, combined_expected_pages)
+            except ArtifactVerificationError as error:
+                raise BatchGenerationError(
+                    "The combined PDF changed before publication.",
+                    code="output.combined_pdf_verification_failed",
+                ) from error
+
+    @staticmethod
+    def _require_template_hash(path: Path, expected_hash: str) -> None:
+        try:
+            current_hash = sha256_file(path)
+        except OSError as error:
+            raise BatchGenerationError(
+                "The certificate template became unavailable during generation.",
+                code="template.changed_during_generation",
+            ) from error
+        if current_hash != expected_hash:
+            raise BatchGenerationError(
+                "The certificate template changed during generation.",
+                code="template.changed_during_generation",
+            )
 
     def _new_batch_id(self) -> str:
         return f"{self._clock():%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"

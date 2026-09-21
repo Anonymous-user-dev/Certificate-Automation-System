@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+from hashlib import sha256
 
 import pytest
 from pypdf import PdfWriter
@@ -12,7 +14,10 @@ from certificate_automation.batch import (
     CancellationToken,
 )
 from certificate_automation.domain import BatchState
-from certificate_automation.mapping import suggest_mappings
+from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
+from certificate_automation.mapping import ColumnValue, MappingPlan, suggest_mappings
+from certificate_automation.output_options import OutputOptions
+from certificate_automation.pdf_merge import CombinedPdfRecord
 from certificate_automation.template import inspect_template
 from certificate_automation.word import Availability
 from certificate_automation.workbook import load_workbook_data
@@ -196,3 +201,147 @@ def test_original_workbook_and_template_are_never_modified(batch_request):
 
     assert batch_request.workbook.path.read_bytes() == workbook_before
     assert batch_request.template.path.read_bytes() == template_before
+
+
+def _typed_request(tmp_path, docx_factory, **selected):
+    template_path = docx_factory(paragraph_runs=[["Certificate for {{FULL_NAME}}"]])
+    template = inspect_template(template_path)
+    dataset = TabularDataset(
+        (Column("full_name", "Full Name"),),
+        (
+            DataRow("row-1", 2, {"full_name": "Ana García"}),
+            DataRow("row-2", 3, {"full_name": "李明"}),
+        ),
+        SourceSnapshot(
+            "manual",
+            "Recipients",
+            None,
+            "d" * 64,
+            datetime(2026, 9, 20, tzinfo=timezone.utc),
+        ),
+        revision=4,
+        order=("row-2", "row-1"),
+    )
+    destination = tmp_path / "typed-batches"
+    destination.mkdir()
+    outputs = OutputOptions(
+        selected.get("docx", False),
+        selected.get("individual_pdf", False),
+        selected.get("combined_pdf", True),
+        destination,
+        "Awards",
+        dataset.order,
+    )
+    return BatchRequest(
+        dataset,
+        template,
+        MappingPlan({"FULL_NAME": ColumnValue("full_name")}),
+        outputs,
+        "zh_CN",
+    )
+
+
+def test_combined_only_publishes_one_ordered_pdf_and_no_temporary_formats(tmp_path, docx_factory):
+    request = _typed_request(tmp_path, docx_factory)
+
+    result = _generator(FakeConverter()).generate(request)
+
+    assert [path.name for path in result.output_dir.glob("*.pdf")] == ["Awards.pdf"]
+    assert not list(result.output_dir.glob("*.docx"))
+    manifest = json.loads((result.output_dir / "manifest.json").read_text("utf-8"))
+    assert manifest["schema_version"] == 2
+    assert manifest["ordered_row_ids"] == ["row-2", "row-1"]
+    assert manifest["combined_pdf"]["source_order"] == ["row-2", "row-1"]
+    assert "recipient_values" not in json.dumps(manifest)
+
+
+def test_docx_only_does_not_require_pdf_converter(tmp_path, docx_factory):
+    request = _typed_request(tmp_path, docx_factory, docx=True, combined_pdf=False)
+
+    class UnavailableConverter(FakeConverter):
+        def is_available(self):
+            return Availability(False, "Word unavailable")
+
+    result = _generator(UnavailableConverter()).generate(request)
+
+    assert len(list(result.output_dir.glob("*.docx"))) == 2
+    assert not list(result.output_dir.glob("*.pdf"))
+
+
+@pytest.mark.parametrize(
+    ("selected", "docx_count", "pdf_count"),
+    [
+        ({"individual_pdf": True, "combined_pdf": False}, 0, 2),
+        ({"docx": True, "individual_pdf": True, "combined_pdf": True}, 2, 3),
+    ],
+)
+def test_selected_formats_are_the_only_published_recipient_files(
+    tmp_path,
+    docx_factory,
+    selected,
+    docx_count,
+    pdf_count,
+):
+    request = _typed_request(tmp_path, docx_factory, **selected)
+
+    result = _generator(FakeConverter()).generate(request)
+
+    assert len(list(result.output_dir.glob("*.docx"))) == docx_count
+    assert len(list(result.output_dir.glob("*.pdf"))) == pdf_count
+
+
+def test_combined_page_count_mismatch_blocks_publication(tmp_path, docx_factory, monkeypatch):
+    request = _typed_request(tmp_path, docx_factory)
+
+    def corrupt_merge(_inputs, destination):
+        writer = PdfWriter()
+        writer.add_blank_page(width=612, height=792)
+        with destination.open("wb") as output:
+            writer.write(output)
+        return CombinedPdfRecord(
+            destination,
+            1,
+            sha256(destination.read_bytes()).hexdigest(),
+            tuple(_inputs),
+        )
+
+    monkeypatch.setattr("certificate_automation.batch.merge_verified_pdfs", corrupt_merge)
+
+    with pytest.raises(BatchGenerationError) as caught:
+        _generator(FakeConverter()).generate(request)
+
+    assert caught.value.code == "output.combined_pdf_verification_failed"
+    assert not list(request.destination.glob("Certificate Batch *"))
+
+
+def test_cancel_between_merge_and_publish_removes_staging(tmp_path, docx_factory):
+    request = _typed_request(tmp_path, docx_factory)
+    cancellation = CancellationToken()
+
+    def cancel_after_merge(event):
+        if event.phase == "combined_pdf":
+            cancellation.request()
+
+    result = _generator(FakeConverter()).generate(
+        request,
+        progress=cancel_after_merge,
+        cancellation=cancellation,
+    )
+
+    assert result.state is BatchState.CANCELLED
+    assert not list(request.destination.glob(".certificate-staging-*"))
+    assert not list(request.destination.glob("Certificate Batch *"))
+
+
+def test_template_change_during_generation_blocks_publication(tmp_path, docx_factory):
+    request = _typed_request(tmp_path, docx_factory, docx=True, combined_pdf=False)
+
+    def change_template(event):
+        if event.phase == "docx" and event.current == 1:
+            request.template.path.write_bytes(b"changed during generation")
+
+    with pytest.raises(BatchGenerationError) as caught:
+        _generator(FakeConverter()).generate(request, progress=change_template)
+
+    assert caught.value.code == "template.changed_during_generation"
+    assert not list(request.destination.glob("Certificate Batch *"))
