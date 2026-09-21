@@ -112,3 +112,27 @@ def test_excel_failures_have_complete_offline_translations(key, parameters):
 def test_text_and_manual_import_failures_have_complete_translations(key, parameters):
     for locale in ("en", "zh_CN", "ru"):
         assert CatalogSet.load(PACKAGE_ROOT, locale).text(key, **parameters)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "project.already_exists",
+        "project.create_failed",
+        "project.missing",
+        "project.unreadable",
+        "project.schema_missing",
+        "project.newer_schema",
+        "project.older_schema",
+        "project.read_only",
+        "project.save_failed",
+        "project.backup_failed",
+        "project.no_valid_revision",
+        "project.no_valid_backup",
+        "project.invalid_revision",
+        "project.invalid_dataset",
+    ],
+)
+def test_project_failures_have_complete_offline_translations(key):
+    for locale in ("en", "zh_CN", "ru"):
+        assert CatalogSet.load(PACKAGE_ROOT, locale).text(key)

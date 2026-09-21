@@ -9,7 +9,7 @@ import pytest
 from certificate_automation.app import ApplicationServices
 from certificate_automation.domain import BatchResult, BatchState, Recipient
 from certificate_automation.mapping import MappingSelection
-from certificate_automation.recovery import IncompleteBatch, RecoveryService
+from certificate_automation.recovery import DraftProjectBackup, IncompleteBatch, RecoveryService
 from certificate_automation.template import Placeholder, TemplateInspection
 from certificate_automation.ui.main_window import MainWindow
 from certificate_automation.validation import ValidationReport
@@ -134,6 +134,26 @@ def test_recovery_refuses_diagnostic_outside_incomplete_directory(tmp_path):
         RecoveryService().remove(record)
 
     assert incomplete.exists()
+
+
+def test_project_backups_are_discovered_separately_from_incomplete_batches(tmp_path):
+    project = tmp_path / "awards.certproject"
+    project.write_bytes(b"project")
+    newest = tmp_path / "awards.certproject.bak1"
+    older = tmp_path / "awards.certproject.bak2"
+    newest.write_bytes(b"backup-1")
+    older.write_bytes(b"backup-2")
+    incomplete = tmp_path / ".certificate-incomplete-example"
+    incomplete.mkdir()
+    (incomplete / "diagnostic.json").write_text("{}", encoding="utf-8")
+
+    service = RecoveryService()
+
+    assert service.find_project_backups(tmp_path) == (
+        DraftProjectBackup(project, newest, 1),
+        DraftProjectBackup(project, older, 2),
+    )
+    assert len(service.find_incomplete(tmp_path)) == 1
 
 
 def test_destination_selection_shows_recovery_actions(qtbot, tmp_path):

@@ -17,6 +17,13 @@ class IncompleteBatch:
     diagnostic_path: Path
 
 
+@dataclass(frozen=True, slots=True)
+class DraftProjectBackup:
+    project_path: Path
+    backup_path: Path
+    slot: int
+
+
 class RecoveryService:
     def find_incomplete(self, destination: Path) -> tuple[IncompleteBatch, ...]:
         destination = Path(destination)
@@ -38,6 +45,23 @@ class RecoveryService:
                 )
         return tuple(records)
 
+    def find_project_backups(self, directory: Path) -> tuple[DraftProjectBackup, ...]:
+        """List draft backups without mixing them with output recovery records."""
+
+        directory = Path(directory)
+        if not directory.is_dir():
+            return ()
+        records: list[DraftProjectBackup] = []
+        for slot in range(1, 4):
+            suffix = f".certproject.bak{slot}"
+            for backup in sorted(directory.glob(f"*{suffix}"), key=lambda item: item.name.casefold()):
+                if backup.is_file() and not backup.is_symlink():
+                    project = Path(str(backup)[: -len(f".bak{slot}")])
+                    records.append(DraftProjectBackup(project, backup, slot))
+        return tuple(
+            sorted(records, key=lambda record: (record.project_path.name.casefold(), record.slot))
+        )
+
     def remove(self, record: IncompleteBatch) -> None:
         path = Path(record.path)
         if (
@@ -51,4 +75,3 @@ class RecoveryService:
         if diagnostic.parent.resolve() != path.resolve():
             raise ValueError("The diagnostic file is outside the incomplete batch directory.")
         shutil.rmtree(path)
-
