@@ -136,3 +136,35 @@ def test_text_and_manual_import_failures_have_complete_translations(key, paramet
 def test_project_failures_have_complete_offline_translations(key):
     for locale in ("en", "zh_CN", "ru"):
         assert CatalogSet.load(PACKAGE_ROOT, locale).text(key)
+
+
+@pytest.mark.parametrize(
+    ("key", "parameters"),
+    [
+        ("mapping.column_missing", {}),
+        ("mapping.invalid_sequence", {}),
+        ("mapping.invalid_date_format", {}),
+        ("mapping.invalid_join", {}),
+        ("mapping.blank_placeholder", {}),
+        ("mapping.unknown_source_type", {}),
+        ("mapping.invalid_json", {}),
+        ("mapping.invalid_date_source", {}),
+        ("mapping.date_ambiguous", {"row": 2}),
+        ("mapping.date_format_required", {"row": 2}),
+        ("mapping.date_invalid", {"row": 2}),
+        ("mapping.unknown_column", {}),
+        ("output.none_selected", {}),
+        ("output.destination_missing", {}),
+        ("output.row_missing", {}),
+        ("output.duplicate_row", {}),
+        ("output.invalid_batch_name", {}),
+        ("output.unknown_row", {"row_id": "row-1"}),
+        ("output.row_omitted", {"row_id": "row-1"}),
+        ("output.reserved_filename", {"filename": "CON"}),
+        ("output.path_too_long", {"filename": "certificate"}),
+        ("output.filename_collision", {"filename": "Ana"}),
+    ],
+)
+def test_mapping_and_output_failures_have_complete_offline_translations(key, parameters):
+    for locale in ("en", "zh_CN", "ru"):
+        assert CatalogSet.load(PACKAGE_ROOT, locale).text(key, **parameters)

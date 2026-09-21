@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
+from hashlib import sha256
 from pathlib import Path
 import shutil
 import tempfile
 from types import MappingProxyType
 from typing import Mapping
+import unicodedata
 
+from certificate_automation.dataset import TabularDataset
 from certificate_automation.domain import Issue, Severity
-from certificate_automation.filenames import safe_stem
-from certificate_automation.mapping import MappingSelection
+from certificate_automation.filenames import RESERVED_NAMES, safe_stem
+from certificate_automation.mapping import (
+    ColumnValue,
+    FormattedDateValue,
+    JoinValue,
+    MappingEvaluationError,
+    MappingPlan,
+    MappingSelection,
+    evaluate_plan,
+)
+from certificate_automation.output_options import OutputOptions
 from certificate_automation.template import TemplateInspection
 from certificate_automation.workbook import WorkbookData, normalize_field_name
 
@@ -26,8 +37,10 @@ class ValidationReport:
     """Complete preflight result, including the deterministic filename plan."""
 
     issues: tuple[Issue, ...]
-    filename_stems: Mapping[int, str]
+    filename_stems: Mapping[int | str, str]
     estimated_bytes: int
+    dataset_revision: int = -1
+    template_sha256: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -42,12 +55,29 @@ class ValidationReport:
 
 
 def validate_preflight(
+    workbook: WorkbookData | TabularDataset,
+    template: TemplateInspection,
+    mappings: MappingSelection | MappingPlan,
+    destination: Path | OutputOptions,
+) -> ValidationReport:
+    """Return every actionable issue without creating certificate outputs."""
+
+    if isinstance(workbook, TabularDataset):
+        if not isinstance(mappings, MappingPlan) or not isinstance(destination, OutputOptions):
+            raise TypeError("TabularDataset validation requires MappingPlan and OutputOptions")
+        return _validate_dataset(workbook, template, mappings, destination)
+    if not isinstance(mappings, MappingSelection) or isinstance(destination, OutputOptions):
+        raise TypeError("WorkbookData validation requires MappingSelection and destination")
+    return _validate_legacy(workbook, template, mappings, Path(destination))
+
+
+def _validate_legacy(
     workbook: WorkbookData,
     template: TemplateInspection,
     mappings: MappingSelection,
     destination: Path,
 ) -> ValidationReport:
-    """Return every actionable issue without creating certificate outputs."""
+    """Compatibility preflight for the original workbook-only workflow."""
 
     issues: list[Issue] = []
     destination = Path(destination)
@@ -192,6 +222,251 @@ def validate_preflight(
         )
     )
     return ValidationReport(tuple(issues), filename_stems, estimated_bytes)
+
+
+def _validate_dataset(
+    dataset: TabularDataset,
+    template: TemplateInspection,
+    plan: MappingPlan,
+    options: OutputOptions,
+) -> ValidationReport:
+    """Validate the complete immutable dataset before any official output exists."""
+
+    issues: list[Issue] = []
+    template_hash = _file_sha256(template.path)
+    if not dataset.rows:
+        issues.append(_error("validation.no_recipients", "dataset"))
+    if not template.placeholders:
+        issues.append(_error("validation.no_placeholders", "template"))
+
+    template_names = set(template.names)
+    for placeholder in plan.unresolved(template.names):
+        issues.append(
+            _error(
+                "validation.unresolved_placeholder",
+                "mapping",
+                {"placeholder": placeholder},
+            )
+        )
+    for placeholder in plan.sources:
+        if placeholder not in template_names:
+            issues.append(
+                _error(
+                    "validation.mapping_not_in_template",
+                    "mapping",
+                    {"placeholder": placeholder},
+                )
+            )
+
+    dataset_ids = {row.row_id for row in dataset.rows}
+    option_ids = set(options.row_ids)
+    for row_id in options.row_ids:
+        if row_id not in dataset_ids:
+            issues.append(
+                _error("output.unknown_row", "output", {"row_id": row_id}, row_id=row_id)
+            )
+    for row_id in dataset.order:
+        if row_id not in option_ids:
+            issues.append(
+                _error("output.row_omitted", "output", {"row_id": row_id}, row_id=row_id)
+            )
+
+    filename_stems: dict[str, str] = {}
+    resolved_records: dict[tuple[str, ...], str] = {}
+    collision_groups: dict[str, list[str]] = {}
+    full_name_placeholder = next(
+        (name for name in template.names if normalize_field_name(name) == "full_name"),
+        None,
+    )
+    column_ids = {column.column_id for column in dataset.columns}
+
+    for placeholder, source in plan.sources.items():
+        referenced = _referenced_columns(source)
+        for column_id in referenced:
+            if column_id not in column_ids:
+                issues.append(
+                    _error(
+                        "validation.unknown_workbook_column",
+                        "mapping",
+                        {"column": column_id},
+                        column_id=column_id,
+                    )
+                )
+
+    for row_id in options.row_ids:
+        if row_id not in dataset_ids:
+            continue
+        row = dataset.row(row_id)
+        display_row = row.source_row if row.source_row is not None else dataset.order.index(row_id) + 1
+        replacements: dict[str, str] = {}
+        for placeholder, source in plan.sources.items():
+            try:
+                replacements.update(
+                    evaluate_plan(MappingPlan({placeholder: source}), dataset, row_id)
+                )
+            except MappingEvaluationError as error:
+                issues.append(
+                    _error(
+                        error.code,
+                        "mapping",
+                        {"row": display_row},
+                        row_id=error.row_id or row_id,
+                        column_id=error.column_id,
+                    )
+                )
+
+        normalized_record: list[str] = []
+        complete = True
+        for placeholder in template.names:
+            if placeholder not in plan.sources:
+                complete = False
+                continue
+            value = replacements.get(placeholder, "").strip()
+            if not value:
+                complete = False
+                issues.append(
+                    _error(
+                        "validation.blank_mapped_value",
+                        "dataset",
+                        {"row": display_row, "placeholder": placeholder},
+                        row_id=row_id,
+                        column_id=_primary_column(plan.sources[placeholder]),
+                    )
+                )
+            elif len(value) > MAX_VALUE_LENGTH:
+                issues.append(
+                    _error(
+                        "validation.value_too_long",
+                        "dataset",
+                        {
+                            "row": display_row,
+                            "maximum": MAX_VALUE_LENGTH,
+                            "placeholder": placeholder,
+                        },
+                        row_id=row_id,
+                        column_id=_primary_column(plan.sources[placeholder]),
+                    )
+                )
+            normalized_record.append(unicodedata.normalize("NFC", value).casefold())
+
+        record_key = tuple(normalized_record)
+        if complete and record_key in resolved_records:
+            first_id = resolved_records[record_key]
+            issues.append(
+                _error(
+                    "validation.duplicate_recipient",
+                    "dataset",
+                    {"row": display_row, "first_row": _display_row(dataset, first_id)},
+                    row_id=row_id,
+                )
+            )
+        elif complete:
+            resolved_records[record_key] = row_id
+
+        filename_value = (
+            replacements.get(full_name_placeholder, "")
+            if full_name_placeholder is not None
+            else f"certificate-row-{display_row}"
+        )
+        stem = safe_stem(filename_value)
+        filename_stems[row_id] = stem
+        collision_key = unicodedata.normalize("NFC", stem).casefold()
+        collision_groups.setdefault(collision_key, []).append(row_id)
+
+        raw_base = str(filename_value).strip().split(".", maxsplit=1)[0].casefold()
+        if raw_base in RESERVED_NAMES:
+            issues.append(
+                _error(
+                    "output.reserved_filename",
+                    "output",
+                    {"filename": filename_value},
+                    row_id=row_id,
+                    column_id=_primary_column(plan.sources.get(full_name_placeholder)),
+                )
+            )
+        extensions = ([".docx"] if options.docx else []) + (
+            [".pdf"] if options.individual_pdf else []
+        )
+        if any(len(str(options.destination / f"{stem}{extension}")) > 240 for extension in extensions):
+            issues.append(
+                _error(
+                    "output.path_too_long",
+                    "output",
+                    {"filename": stem},
+                    row_id=row_id,
+                )
+            )
+
+    for row_ids in collision_groups.values():
+        if len(row_ids) < 2:
+            continue
+        filename = filename_stems[row_ids[0]]
+        for row_id in row_ids:
+            issues.append(
+                _error(
+                    "output.filename_collision",
+                    "output",
+                    {"filename": filename},
+                    row_id=row_id,
+                    column_id=_primary_column(plan.sources.get(full_name_placeholder)),
+                )
+            )
+
+    estimated_bytes = _estimate_dataset_working_space(dataset, template, options)
+    source_paths = tuple(
+        path
+        for path in (dataset.source.path, template.path)
+        if path is not None
+    )
+    issues.extend(_validate_destination(options.destination, source_paths, estimated_bytes))
+    return ValidationReport(
+        tuple(issues),
+        filename_stems,
+        estimated_bytes,
+        dataset.revision,
+        template_hash,
+    )
+
+
+def _referenced_columns(source: object) -> tuple[str, ...]:
+    if isinstance(source, ColumnValue):
+        return (source.column_id,)
+    if isinstance(source, FormattedDateValue):
+        return (source.source.column_id,)
+    if isinstance(source, JoinValue):
+        return source.column_ids
+    return ()
+
+
+def _primary_column(source: object) -> str | None:
+    columns = _referenced_columns(source)
+    return columns[0] if columns else None
+
+
+def _display_row(dataset: TabularDataset, row_id: str) -> int:
+    row = dataset.row(row_id)
+    return row.source_row if row.source_row is not None else dataset.order.index(row_id) + 1
+
+
+def _file_sha256(path: Path) -> str:
+    digest = sha256()
+    try:
+        with Path(path).open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError:
+        return ""
+    return digest.hexdigest()
+
+
+def _estimate_dataset_working_space(
+    dataset: TabularDataset,
+    template: TemplateInspection,
+    options: OutputOptions,
+) -> int:
+    template_size = template.path.stat().st_size if template.path.exists() else 0
+    copies = int(options.docx) + int(options.individual_pdf or options.combined_pdf) * 2
+    return max(MINIMUM_WORKING_SPACE, template_size * max(len(dataset.rows), 1) * max(copies, 1))
 
 
 def _estimate_working_space(

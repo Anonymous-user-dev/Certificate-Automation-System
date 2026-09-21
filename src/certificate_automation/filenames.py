@@ -40,3 +40,13 @@ def safe_stem(value: str) -> str:
         stem = f"{stem[:prefix_length].rstrip(' ._')}-{digest}"
     return stem
 
+
+def is_safe_windows_stem(value: str) -> bool:
+    """Return whether a user-supplied stem is already safe and unambiguous."""
+
+    candidate = str(value).strip()
+    if not candidate or candidate in {".", ".."} or len(candidate) > MAX_STEM_LENGTH:
+        return False
+    if candidate.endswith((" ", ".")) or _CONTROL_OR_INVALID.search(candidate):
+        return False
+    return candidate.split(".", maxsplit=1)[0].casefold() not in RESERVED_NAMES

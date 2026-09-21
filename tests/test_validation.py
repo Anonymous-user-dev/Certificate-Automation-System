@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
 from certificate_automation.domain import Recipient
 from certificate_automation.filenames import MAX_STEM_LENGTH, RESERVED_NAMES, safe_stem
-from certificate_automation.mapping import MappingSelection
+from certificate_automation.mapping import (
+    ColumnValue,
+    FormattedDateValue,
+    MappingPlan,
+    MappingSelection,
+)
+from certificate_automation.output_options import OutputOptions, OutputOptionsError
 from certificate_automation.template import Placeholder, TemplateInspection
 from certificate_automation.validation import validate_preflight
 from certificate_automation.workbook import WorkbookData
@@ -181,3 +189,115 @@ def test_destination_cannot_be_a_source_file(tmp_path):
     report = validate_preflight(workbook, template, mappings, workbook.path)
 
     assert any(issue.code == "validation.destination_is_source" for issue in report.issues)
+
+
+def _canonical_dataset(*names: str) -> TabularDataset:
+    return TabularDataset(
+        (Column("full_name", "Full Name"), Column("date", "Date")),
+        tuple(
+            DataRow(f"row-{index}", index + 1, {"full_name": name, "date": "2026-09-20"})
+            for index, name in enumerate(names, start=1)
+        ),
+        SourceSnapshot(
+            "manual",
+            "Recipients",
+            None,
+            "d" * 64,
+            datetime(2026, 9, 20, tzinfo=timezone.utc),
+        ),
+    )
+
+
+def _typed_template(tmp_path: Path) -> TemplateInspection:
+    path = tmp_path / "typed.docx"
+    path.write_bytes(b"typed template")
+    return TemplateInspection(
+        path,
+        (
+            Placeholder("FULL_NAME", 1, ("word/document.xml",)),
+            Placeholder("DATE", 1, ("word/document.xml",)),
+        ),
+    )
+
+
+def _typed_options(tmp_path: Path, dataset: TabularDataset) -> OutputOptions:
+    destination = tmp_path / "typed-output"
+    destination.mkdir()
+    return OutputOptions(
+        docx=True,
+        individual_pdf=False,
+        combined_pdf=False,
+        destination=destination,
+        batch_name="Awards 2026",
+        row_ids=dataset.order,
+    )
+
+
+def test_typed_preflight_is_revision_bound_and_uses_stable_row_ids(tmp_path):
+    dataset = _canonical_dataset("Ana García", "李明")
+    report = validate_preflight(
+        dataset,
+        _typed_template(tmp_path),
+        MappingPlan({"FULL_NAME": ColumnValue("full_name"), "DATE": ColumnValue("date")}),
+        _typed_options(tmp_path, dataset),
+    )
+
+    assert report.ready
+    assert report.filename_stems == {"row-1": "Ana_García", "row-2": "李明"}
+    assert report.dataset_revision == dataset.revision
+    assert len(report.template_sha256) == 64
+
+
+def test_ambiguous_date_blocks_the_exact_source_cell(tmp_path):
+    dataset = _canonical_dataset("Ana").with_cell("row-1", "date", "01/02/2026")
+    plan = MappingPlan(
+        {
+            "FULL_NAME": ColumnValue("full_name"),
+            "DATE": FormattedDateValue(ColumnValue("date"), "", "%Y-%m-%d"),
+        }
+    )
+
+    report = validate_preflight(dataset, _typed_template(tmp_path), plan, _typed_options(tmp_path, dataset))
+    issue = next(item for item in report.issues if item.code == "mapping.date_ambiguous")
+
+    assert (issue.row_id, issue.column_id) == ("row-1", "date")
+    assert report.ready is False
+
+
+def test_unicode_normalization_filename_collision_blocks_both_rows(tmp_path):
+    dataset = _canonical_dataset("José", "Jose\u0301")
+    report = validate_preflight(
+        dataset,
+        _typed_template(tmp_path),
+        MappingPlan({"FULL_NAME": ColumnValue("full_name"), "DATE": ColumnValue("date")}),
+        _typed_options(tmp_path, dataset),
+    )
+
+    collisions = [item for item in report.issues if item.code == "output.filename_collision"]
+    assert {item.row_id for item in collisions} == {"row-1", "row-2"}
+
+
+@pytest.mark.parametrize(
+    "kwargs,code",
+    [
+        ({"docx": False, "individual_pdf": False, "combined_pdf": False}, "output.none_selected"),
+        ({"destination": None}, "output.destination_missing"),
+        ({"row_ids": ("row-1", "row-1")}, "output.duplicate_row"),
+        ({"combined_pdf": True, "batch_name": "CON"}, "output.invalid_batch_name"),
+    ],
+)
+def test_output_options_reject_unsafe_combinations(tmp_path, kwargs, code):
+    values = {
+        "docx": True,
+        "individual_pdf": False,
+        "combined_pdf": False,
+        "destination": tmp_path,
+        "batch_name": "Awards",
+        "row_ids": ("row-1",),
+    }
+    values.update(kwargs)
+
+    with pytest.raises(OutputOptionsError) as caught:
+        OutputOptions(**values)
+
+    assert caught.value.code == code

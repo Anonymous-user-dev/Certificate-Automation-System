@@ -398,6 +398,9 @@ def _plain_json(value: object) -> object:
 
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    serializer = getattr(value, "to_json", None)
+    if callable(serializer):
+        return _plain_json(serializer())
     if isinstance(value, Mapping):
         return {str(key): _plain_json(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):

@@ -6,6 +6,8 @@ from PySide6.QtTest import QSignalSpy
 import pytest
 
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
+from certificate_automation.mapping import ColumnValue, MappingPlan
+from certificate_automation.output_options import OutputOptions
 from certificate_automation.project import (
     ProjectCoordinator,
     ProjectCorruptError,
@@ -168,3 +170,27 @@ def test_failed_coordinator_flush_keeps_pending_for_retry(qtbot, tmp_path, monke
     assert coordinator.flush() is False
     assert coordinator.has_pending is True
     assert failures.count() == 1
+
+
+def test_project_accepts_typed_mapping_and_output_records(tmp_path):
+    dataset = _dataset()
+    state = ProjectState(
+        revision=1,
+        dataset=dataset,
+        mapping_plan=MappingPlan({"FULL_NAME": ColumnValue("full_name")}),
+        output_options=OutputOptions(
+            True,
+            False,
+            False,
+            tmp_path / "output",
+            "Awards",
+            dataset.order,
+        ),
+    )
+    store = ProjectStore.create(tmp_path / "typed.certproject")
+
+    store.save(state)
+    reopened = store.load()
+
+    assert MappingPlan.from_json(reopened.mapping_plan).sources["FULL_NAME"] == ColumnValue("full_name")
+    assert reopened.output_options["row_ids"] == ["row-ru", "row-cn"]
