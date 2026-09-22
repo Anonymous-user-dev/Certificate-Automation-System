@@ -136,6 +136,7 @@
   "output.combined_pdf_verification_failed": "The combined PDF failed final verification. Nothing was published.",
   "output.destination_missing": "Choose an output folder.",
   "output.destination": "Output folder",
+  "output.default_batch_name": "Certificate Batch",
   "output.docx": "Editable Word documents",
   "output.duplicate_row": "The generation order contains the same recipient more than once.",
   "output.filename_collision": "More than one certificate would use the filename ‘{filename}’.",

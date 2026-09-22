@@ -5,11 +5,13 @@ ROOT = Path(SPECPATH).parent
 SOURCE = ROOT / "src"
 
 analysis = Analysis(
-    [str(SOURCE / "certificate_automation" / "app.py")],
+    [str(SOURCE / "certificate_automation" / "launcher.py")],
     pathex=[str(SOURCE)],
     binaries=[],
     datas=[
+        (str(SOURCE / "certificate_automation" / "locales" / "*.json"), "certificate_automation/locales"),
         (str(ROOT / "docs" / "user-guide.md"), "docs"),
+        (str(ROOT / "examples" / "sample_recipients.csv"), "examples"),
         (str(ROOT / "examples" / "sample_students.xlsx"), "examples"),
         (str(ROOT / "examples" / "sample_certificate_template.docx"), "examples"),
     ],

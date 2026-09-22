@@ -62,19 +62,17 @@ verify_pdf(destination)
 
     stdout_path = tmp_path / "subprocess.stdout.txt"
     stderr_path = tmp_path / "subprocess.stderr.txt"
-    with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
-        "w", encoding="utf-8"
-    ) as stderr:
-        result = subprocess.run(
-            [sys.executable, "-c", script, str(source), str(destination)],
-            stdout=stdout,
-            stderr=stderr,
-            text=True,
-            env=environment,
-            timeout=60,
-            check=False,
-        )
-    error_output = stderr_path.read_text("utf-8")
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(source), str(destination)],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=60,
+        check=False,
+    )
+    stdout_path.write_text(result.stdout, encoding="utf-8")
+    stderr_path.write_text(result.stderr, encoding="utf-8")
+    error_output = result.stderr
 
     assert result.returncode == 0, error_output
     assert "fatal exception" not in error_output.casefold(), error_output

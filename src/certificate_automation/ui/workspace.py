@@ -133,6 +133,7 @@ class HomePage(QWidget):
 
 class StepRail(QFrame):
     step_requested = Signal(str)
+    EXPANDED_WIDTH = 280
 
     def __init__(self, catalogs: CatalogSet, parent=None) -> None:
         super().__init__(parent)
@@ -169,7 +170,7 @@ class StepRail(QFrame):
         if compact == self._compact:
             return
         self._compact = compact
-        self.setFixedWidth(76 if compact else 210)
+        self.setFixedWidth(76 if compact else self.EXPANDED_WIDTH)
         self._refresh_buttons()
 
     def set_state(self, current: str, completed: tuple[str, ...]) -> None:
@@ -324,7 +325,7 @@ class WorkspaceWindow(QMainWindow):
 
         body = QHBoxLayout()
         self.step_rail = StepRail(self.catalogs)
-        self.step_rail.setFixedWidth(210)
+        self.step_rail.setFixedWidth(StepRail.EXPANDED_WIDTH)
         body.addWidget(self.step_rail)
         self.page_stack = QStackedWidget()
         self.data_page = DataPage(self.catalogs)
@@ -363,22 +364,6 @@ class WorkspaceWindow(QMainWindow):
         bottom_layout.addWidget(self.next_button)
         outer.addWidget(bottom)
         return container
-
-    def _placeholder_page(self, title_key: str) -> QWidget:
-        page = QFrame()
-        page.setProperty("role", "surface")
-        page.setProperty("titleKey", title_key)
-        layout = QVBoxLayout(page)
-        title = QLabel()
-        title.setObjectName("placeholderTitle")
-        title.setProperty("role", "title")
-        explanation = QLabel()
-        explanation.setObjectName("placeholderExplanation")
-        explanation.setWordWrap(True)
-        layout.addWidget(title)
-        layout.addWidget(explanation)
-        layout.addStretch(1)
-        return page
 
     def new_project(self) -> None:
         dataset = TabularDataset(

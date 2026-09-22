@@ -1,5 +1,5 @@
 #define AppName "Certificate Automation"
-#define AppVersion "1.0.0"
+#define AppVersion "2.0.0"
 #define AppPublisher "Certificate Automation"
 #define AppExeName "CertificateAutomation.exe"
 #ifndef BuildRoot
@@ -33,6 +33,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 [Files]
 Source: "{#BuildRoot}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\examples\sample_students.xlsx"; DestDir: "{app}\examples"; Flags: ignoreversion
+Source: "..\examples\sample_recipients.csv"; DestDir: "{app}\examples"; Flags: ignoreversion
 Source: "..\examples\sample_certificate_template.docx"; DestDir: "{app}\examples"; Flags: ignoreversion
 Source: "..\docs\user-guide.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 

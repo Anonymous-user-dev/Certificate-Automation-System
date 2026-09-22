@@ -5,17 +5,19 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from PySide6.QtCore import QSettings, Qt
+from PySide6.QtWidgets import QMessageBox
 import pytest
 
 from certificate_automation.batch import BatchResult
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
-from certificate_automation.domain import BatchState
+from certificate_automation.domain import BatchState, Issue, Severity
 from certificate_automation.i18n import CatalogSet, package_root
 from certificate_automation.mapping import ColumnValue, FormattedDateValue, MappingPlan
 from certificate_automation.output_options import OutputOptions
+from certificate_automation.project import ProjectState
 from certificate_automation.template import inspect_template
 from certificate_automation.ui.workspace import WorkspaceWindow
-from certificate_automation.validation import validate_preflight
+from certificate_automation.validation import ValidationReport, validate_preflight
 from certificate_automation.word import WordAvailability
 from fixtures import docx_factory
 
@@ -229,3 +231,254 @@ def test_clipboard_source_card_uses_offline_clipboard_adapter(
     window._paste_source()
 
     assert captured == [dataset]
+
+
+def test_source_buttons_dispatch_manual_excel_and_text_imports(
+    qtbot, tmp_path, docx_factory, monkeypatch
+):
+    services = _services(tmp_path, docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    services.create_manual_dataset = lambda _labels: _dataset()
+    window = WorkspaceWindow(services)
+    qtbot.addWidget(window)
+    calls = []
+    monkeypatch.setattr(window, "_import_excel_file", lambda path: calls.append(("excel", path)))
+    monkeypatch.setattr(window, "_import_delimited_file", lambda path: calls.append(("text", path)))
+    choices = iter(((str(tmp_path / "people.xlsx"), ""), (str(tmp_path / "people.csv"), "")))
+    monkeypatch.setattr(
+        "certificate_automation.ui.workspace.QFileDialog.getOpenFileName",
+        lambda *_args: next(choices),
+    )
+
+    window._import_source("manual")
+    window._import_source("excel")
+    window._import_source("delimited")
+
+    assert window.data_page.model.dataset == _dataset()
+    assert calls == [
+        ("excel", tmp_path / "people.xlsx"),
+        ("text", tmp_path / "people.csv"),
+    ]
+
+
+def test_excel_import_requires_sheet_and_hidden_data_decisions(
+    qtbot, tmp_path, docx_factory, monkeypatch
+):
+    services = _services(tmp_path, docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    first = SimpleNamespace(
+        sheet_name="One",
+        sheet_names=("One", "Two"),
+        requires_hidden_data_choice=False,
+    )
+    chosen = SimpleNamespace(
+        sheet_name="Two",
+        sheet_names=("One", "Two"),
+        requires_hidden_data_choice=True,
+    )
+    services.inspect_excel = lambda _path, sheet=None: chosen if sheet else first
+    imports = []
+    services.import_excel = lambda path, sheet, **options: imports.append(
+        (path, sheet, options)
+    ) or _dataset()
+    window = WorkspaceWindow(services)
+    qtbot.addWidget(window)
+    previews = []
+    monkeypatch.setattr(window, "_confirm_import", lambda dataset, **details: previews.append(details))
+    monkeypatch.setattr(
+        "certificate_automation.ui.workspace.QInputDialog.getItem",
+        lambda *_args: ("Two", True),
+    )
+    monkeypatch.setattr(
+        "certificate_automation.ui.workspace.QMessageBox.question",
+        lambda *_args: QMessageBox.StandardButton.Yes,
+    )
+
+    window._import_excel_file(tmp_path / "people.xlsx")
+
+    assert imports[0][1:] == ("Two", {"include_hidden": True})
+    assert previews[0]["hidden_policy"] == "included"
+
+
+def test_ambiguous_text_and_clipboard_choices_are_explicit(
+    qtbot, tmp_path, docx_factory, monkeypatch
+):
+    services = _services(tmp_path, docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    services.inspect_delimited = lambda _path: SimpleNamespace(
+        encoding=None,
+        delimiter=None,
+        encoding_candidates=("utf-8", "cp1251"),
+        delimiter_candidates=("\t", ","),
+    )
+    services.import_delimited = lambda *_args: _dataset()
+    services.inspect_clipboard = lambda _text: SimpleNamespace(
+        mode=None, mode_candidates=("tabs", "csv")
+    )
+    services.import_clipboard = lambda *_args: _dataset()
+    window = WorkspaceWindow(services)
+    qtbot.addWidget(window)
+    previews = []
+    monkeypatch.setattr(window, "_confirm_import", lambda dataset, **details: previews.append(details))
+    answers = iter((("utf-8", True), ("tab", True), ("tabs", True)))
+    monkeypatch.setattr(
+        "certificate_automation.ui.workspace.QInputDialog.getItem",
+        lambda *_args: next(answers),
+    )
+    from PySide6.QtWidgets import QApplication
+    QApplication.clipboard().setText("Name\tAward\nLi\tGold")
+
+    window._import_delimited_file(tmp_path / "people.txt")
+    window._paste_source()
+
+    assert previews[0]["delimiter"] == "TAB"
+    assert previews[1]["delimiter"] == "TAB"
+
+
+def test_import_preview_accepts_snapshot_and_errors_preserve_current_data(
+    qtbot, tmp_path, docx_factory, monkeypatch
+):
+    services = _services(tmp_path, docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    window = WorkspaceWindow(services)
+    qtbot.addWidget(window)
+    monkeypatch.setattr(
+        "certificate_automation.ui.workspace.ImportPreviewDialog.exec",
+        lambda _dialog: 1,
+    )
+
+    window._confirm_import(
+        _dataset(), encoding="UTF-8", delimiter=",", worksheet="—", hidden_policy="—"
+    )
+    window._show_import_error(SimpleNamespace(code="import.failed", parameters={}))
+
+    assert window.data_page.model.dataset == _dataset()
+    assert window.banner.issue_code == "import.failed"
+
+
+def test_preview_failures_and_published_result_links_stay_inside_verified_paths(
+    qtbot, tmp_path, docx_factory, monkeypatch
+):
+    services = _services(tmp_path, docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    opened = []
+    services.open_path = lambda path: opened.append(path) or True
+    window = WorkspaceWindow(services)
+    qtbot.addWidget(window)
+    errors = []
+    monkeypatch.setattr(window.review_page, "show_preview_error", errors.append)
+    window._generate_preview("row-1")
+    assert errors
+
+    services.preview_service = SimpleNamespace(generate=lambda *_args: (_ for _ in ()).throw(RuntimeError("preview failed")), clear=lambda: None)
+    window.project_state = window.project_state.__class__(
+        dataset=_dataset(), template=inspect_template(services.template), plan=MappingPlan({"FULL_NAME": ColumnValue("name")})
+    )
+    window._generate_preview("row-1")
+    assert errors[-1] == "preview failed"
+
+    output = tmp_path / "published-links"
+    output.mkdir()
+    for name in ("manifest.json", "batch_summary.html", "Awards.pdf"):
+        (output / name).write_bytes(b"x")
+    window.results_page.result = BatchResult(BatchState.PUBLISHED, output, 2)
+    window.project_state = window.project_state.__class__(
+        dataset=_dataset(),
+        outputs=OutputOptions(True, False, True, tmp_path, "Awards", _dataset().order),
+    )
+    window._open_published_output()
+    window._open_result_file("manifest.json")
+    window._open_combined_output()
+
+    assert opened == [output, output / "manifest.json", output / "Awards.pdf"]
+
+
+def test_saved_project_and_home_file_actions_restore_local_workflow(
+    qtbot, tmp_path, docx_factory, monkeypatch
+):
+    services = _services(tmp_path, docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    draft = tmp_path / "draft.certificate-project"
+    draft.write_text("placeholder", "utf-8")
+    project = ProjectState(4, _dataset(), locale="ru", active_step="template")
+    services.open_project = lambda _path: SimpleNamespace(load=lambda: project)
+    opened = []
+    services.open_path = lambda path: opened.append(path) or True
+    settings = QSettings(str(tmp_path / "home.ini"), QSettings.Format.IniFormat)
+    window = WorkspaceWindow(services, settings=settings)
+    qtbot.addWidget(window)
+    window.open_project(draft)
+
+    assert window.current_step == "template"
+    assert window.catalogs.locale == "ru"
+    settings.setValue("recent_projects", str(draft))
+    window._continue_draft()
+    monkeypatch.setattr(
+        "certificate_automation.ui.workspace.QFileDialog.getOpenFileName",
+        lambda *_args: (str(draft), ""),
+    )
+    settings.setValue("recent_projects", [])
+    window._continue_draft()
+    window._recover_draft()
+    monkeypatch.setattr(
+        "certificate_automation.ui.workspace.QFileDialog.getExistingDirectory",
+        lambda *_args: str(tmp_path),
+    )
+    window._open_results()
+
+    assert opened == [tmp_path]
+
+
+def test_navigation_and_generation_guards_explain_stale_or_invalid_state(
+    qtbot, tmp_path, docx_factory
+):
+    template = inspect_template(docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    services = _services(tmp_path, template.path)
+    window = WorkspaceWindow(services)
+    qtbot.addWidget(window)
+    window.navigate("unknown")
+    window.navigate("generate")
+    assert window.current_step == "data"
+    window.start_generation()
+    assert window.banner.issue_code == "navigation.complete_previous"
+
+    dataset = _dataset()
+    options = OutputOptions(True, False, False, tmp_path / "out", "Batch", dataset.order)
+    window.project_state = window.project_state.__class__(
+        dataset=dataset,
+        template=template,
+        plan=MappingPlan({"FULL_NAME": ColumnValue("name")}),
+        outputs=options,
+    )
+    services.validate = lambda *_args: ValidationReport((), {}, 0, dataset.revision + 1, template.sha256)
+    window.start_generation()
+    assert window.banner.issue_code == "validation.revision_changed"
+
+    issue = Issue(Severity.ERROR, "dataset", "validation.no_recipients")
+    services.validate = lambda *_args: ValidationReport((issue,), {}, 0, dataset.revision, template.sha256)
+    window.start_generation()
+    assert window.current_step == "review"
+    assert window.review_page.issue_list.count() == 1
+
+
+def test_successful_preview_and_cleanup_use_only_preview_service(
+    qtbot, tmp_path, docx_factory, monkeypatch
+):
+    template = inspect_template(docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    services = _services(tmp_path, template.path)
+    pdf = tmp_path / "preview.pdf"
+    pdf.write_bytes(b"pdf")
+    cleared = []
+    services.preview_service = SimpleNamespace(
+        generate=lambda *_args: SimpleNamespace(pdf_path=pdf),
+        clear=lambda: cleared.append(True),
+    )
+    window = WorkspaceWindow(services)
+    qtbot.addWidget(window)
+    window.project_state = window.project_state.__class__(
+        dataset=_dataset(),
+        template=template,
+        plan=MappingPlan({"FULL_NAME": ColumnValue("name")}),
+    )
+    shown = []
+    monkeypatch.setattr(window.review_page, "set_preview", shown.append)
+
+    window._generate_preview("row-1")
+    window.close()
+
+    assert shown == [pdf]
+    assert cleared == [True]

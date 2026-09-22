@@ -27,7 +27,8 @@ class OutputPage(QWidget):
         self.combined_pdf = QCheckBox()
         self.destination = QLineEdit()
         self.browse_button = QPushButton()
-        self.batch_name = QLineEdit("Certificate Batch")
+        self.batch_name = QLineEdit()
+        self._last_default_batch_name = ""
         self.order_list = QListWidget()
         self.error_label = QLabel()
         self.error_label.setProperty("state", "error")
@@ -72,6 +73,11 @@ class OutputPage(QWidget):
             control.setToolTip("" if availability.available else availability.message)
 
     def retranslate(self) -> None:
+        previous_default = self._last_default_batch_name
+        translated_default = self._catalogs.text("output.default_batch_name")
+        if not self.batch_name.text() or self.batch_name.text() == previous_default:
+            self.batch_name.setText(translated_default)
+        self._last_default_batch_name = translated_default
         self.title.setText(self._catalogs.text("output.title"))
         controls = (
             (self.docx, "output.docx"),

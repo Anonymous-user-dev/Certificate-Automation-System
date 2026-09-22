@@ -5,17 +5,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+import os
 import shutil
 import sys
 import tempfile
 
-from PySide6.QtCore import QSettings, QTimer, QUrl
+from PySide6.QtCore import QSettings, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from certificate_automation.batch import BatchGenerator
 from certificate_automation.filenames import safe_stem
-from certificate_automation.i18n import CatalogSet, package_root
+from certificate_automation.i18n import CatalogSet, package_root, validate_catalogs
 from certificate_automation.importers.clipboard import (
     create_manual_dataset,
     import_clipboard,
@@ -150,6 +151,10 @@ def create_default_services(locale: str = "en") -> ApplicationServices:
 
 
 def main() -> int:
+    if "--smoke-test" in sys.argv:
+        exit_code = 2 if validate_catalogs(package_root()) else 0
+        create_default_services("en")
+        os._exit(exit_code)
     application = QApplication.instance() or QApplication(sys.argv)
     application.setOrganizationName("Certificate Automation")
     application.setApplicationName("Certificate Automation")
@@ -159,8 +164,6 @@ def main() -> int:
 
     window = WorkspaceWindow(create_default_services(locale), settings=settings)
     window.show()
-    if "--smoke-test" in sys.argv:
-        QTimer.singleShot(250, application.quit)
     return application.exec()
 
 

@@ -136,6 +136,7 @@
   "output.combined_pdf_verification_failed": "Объединённый PDF не прошёл итоговую проверку. Ничего не опубликовано.",
   "output.destination_missing": "Выберите папку вывода.",
   "output.destination": "Папка вывода",
+  "output.default_batch_name": "Пакет сертификатов",
   "output.docx": "Редактируемые документы Word",
   "output.duplicate_row": "Один получатель несколько раз указан в порядке создания.",
   "output.filename_collision": "Несколько сертификатов получат имя файла «{filename}».",

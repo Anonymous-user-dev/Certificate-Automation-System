@@ -1,3 +1,4 @@
+from contextlib import closing
 from datetime import datetime, timezone
 from hashlib import sha256
 import sqlite3
@@ -109,7 +110,7 @@ def test_recover_latest_uses_newest_valid_backup_when_main_is_corrupt(tmp_path):
 def test_corrupt_revision_hash_is_rejected(tmp_path):
     store = ProjectStore.create(tmp_path / "draft.certproject")
     store.save(_state(tmp_path))
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         connection.execute("UPDATE revisions SET payload_sha256 = 'bad'")
 
     with pytest.raises(ProjectCorruptError) as caught:
@@ -134,7 +135,7 @@ def test_changed_template_hash_invalidates_all_downstream_state(tmp_path):
 
 def test_newer_schema_is_opened_read_only(tmp_path):
     path = tmp_path / "future.certproject"
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         connection.execute("INSERT INTO metadata VALUES ('schema_version', '999')")
 

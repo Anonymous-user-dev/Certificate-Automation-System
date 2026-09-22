@@ -76,3 +76,25 @@ def test_narrow_window_keeps_full_step_names_for_accessibility(workspace):
 
     assert workspace.step_rail.is_compact is True
     assert workspace.step_rail.button_for("mapping").accessibleName() == "Match Fields"
+
+
+def test_expanded_russian_step_rail_has_room_for_translated_labels(workspace):
+    workspace.set_locale("ru")
+    workspace.resize(1280, 800)
+
+    assert workspace.step_rail.is_compact is False
+    assert workspace.step_rail.width() >= 280
+    for step in ("data", "template", "mapping", "review", "output", "generate"):
+        button = workspace.step_rail.button_for(step)
+        assert button.fontMetrics().horizontalAdvance(button.text()) <= button.contentsRect().width()
+
+
+def test_default_batch_name_retranslates_without_overwriting_operator_edit(workspace):
+    assert workspace.output_page.batch_name.text() == "Certificate Batch"
+
+    workspace.set_locale("zh_CN")
+    assert workspace.output_page.batch_name.text() == "证书批次"
+
+    workspace.output_page.batch_name.setText("2026 Scholarship Awards")
+    workspace.set_locale("ru")
+    assert workspace.output_page.batch_name.text() == "2026 Scholarship Awards"

@@ -1,11 +1,12 @@
 # Certificate Automation
 
-Certificate Automation is an offline Windows desktop application for generating official certificate batches from an Excel workbook and a Word template. It produces an editable DOCX and a print-ready PDF for every recipient, verifies the complete batch, and publishes nothing unless the entire run succeeds.
+Certificate Automation 2.0 is a fully offline Windows desktop application for generating official certificate batches from Excel, CSV, TSV, pasted, or manually entered tables and a Word template. Operators choose DOCX, individual PDF, and an optional combined print PDF. Nothing is published unless the complete selected batch verifies successfully.
 
 ## Product guarantees
 
 - Guided PySide6 interface for nontechnical staff.
-- Flexible `{{PLACEHOLDER}}` fields matched to Excel columns or fixed values.
+- Flexible `{{PLACEHOLDER}}` fields matched to columns, fixed values, sequences, source rows, formatted dates, or joined columns.
+- English, Simplified Chinese, and Russian interface translations.
 - Complete preflight validation before official generation.
 - Formatting-safe replacement across Word paragraphs, split runs, tables, headers, footers, and text boxes.
 - Microsoft Word PDF conversion for template fidelity.
@@ -16,6 +17,17 @@ Certificate Automation is an offline Windows desktop application for generating 
 - No cloud service, account, telemetry, or runtime network requirement.
 
 Microsoft Word is required for PDF output. The manifest records hashes and processing facts; it is not a digital signature or legal certification.
+
+## Supported recipient sources
+
+| Source | Supported behavior |
+|---|---|
+| Excel `.xlsx` | Explicit worksheet selection; hidden rows/columns require an operator choice; merged data cells and missing formula caches are rejected |
+| CSV / TSV / text | UTF-8, UTF-8 BOM, UTF-16 BOM, Windows-1251, and GB18030; ambiguous encoding or separator requires confirmation |
+| Clipboard | Tab-separated tables or CSV with an import preview |
+| Manual | Spreadsheet-style rows and columns with undo/redo |
+
+Source files are copied into an internal snapshot and are never edited. Draft projects and previews may contain personal data: store drafts in an approved location and delete them according to institutional retention policy. Temporary previews are replaced when the data revision changes and removed on normal shutdown.
 
 ## Development setup
 

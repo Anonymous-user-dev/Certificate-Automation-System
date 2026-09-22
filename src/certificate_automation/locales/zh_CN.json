@@ -136,6 +136,7 @@
   "output.combined_pdf_verification_failed": "合并 PDF 未通过最终验证。未发布任何内容。",
   "output.destination_missing": "请选择输出文件夹。",
   "output.destination": "输出文件夹",
+  "output.default_batch_name": "证书批次",
   "output.docx": "可编辑的 Word 文档",
   "output.duplicate_row": "生成顺序中同一收件人出现了多次。",
   "output.filename_collision": "多个证书将使用文件名“{filename}”。",

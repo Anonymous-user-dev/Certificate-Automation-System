@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "certificate-automation"
-version = "1.0.0"
+version = "2.0.0"
 description = "Offline Windows desktop application for verified certificate batch generation"
 requires-python = ">=3.12"
 dependencies = [
@@ -31,6 +31,9 @@ certificate-automation = "certificate_automation.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+certificate_automation = ["locales/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

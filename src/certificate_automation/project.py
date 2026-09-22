@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -152,7 +153,7 @@ class ProjectStore:
             raise ProjectSaveError("project.already_exists")
         store = cls(path)
         try:
-            with store._connect() as connection:
+            with closing(store._connect()) as connection, connection:
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.execute("PRAGMA synchronous=FULL")
                 connection.execute(
@@ -182,7 +183,7 @@ class ProjectStore:
         if not path.is_file():
             raise ProjectCorruptError("project.missing")
         try:
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection, connection:
                 row = connection.execute(
                     "SELECT value FROM metadata WHERE key='schema_version'"
                 ).fetchone()
@@ -205,7 +206,7 @@ class ProjectStore:
         if self.read_only:
             raise ProjectSaveError(self.issue_code or "project.read_only")
         try:
-            with self._connect() as connection:
+            with closing(self._connect()) as connection, connection:
                 connection.execute("BEGIN IMMEDIATE")
                 self._commit(connection, state)
                 connection.commit()
@@ -247,7 +248,7 @@ class ProjectStore:
 
     def load(self) -> ProjectState:
         try:
-            with self._connect() as connection:
+            with closing(self._connect()) as connection, connection:
                 rows = connection.execute(
                     "SELECT payload_json, payload_sha256 FROM revisions ORDER BY revision DESC"
                 ).fetchall()
@@ -277,8 +278,11 @@ class ProjectStore:
             ):
                 if source.exists():
                     os.replace(source, destination)
-            with sqlite3.connect(self.path) as source_connection:
-                with sqlite3.connect(paths[0]) as destination_connection:
+            with closing(sqlite3.connect(self.path)) as source_connection, source_connection:
+                with (
+                    closing(sqlite3.connect(paths[0])) as destination_connection,
+                    destination_connection,
+                ):
                     source_connection.backup(destination_connection)
         except (OSError, sqlite3.Error) as error:
             raise ProjectSaveError("project.backup_failed") from error
