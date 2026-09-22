@@ -741,6 +741,7 @@ class WorkspaceWindow(QMainWindow):
                 self.catalogs.text("review.preview_unavailable")
             )
             return
+        self.review_page.clear_preview()
         try:
             record = service.generate(
                 current.dataset,
@@ -869,6 +870,7 @@ class WorkspaceWindow(QMainWindow):
             return
         preview_service = getattr(self.services, "preview_service", None)
         if preview_service is not None:
+            self.review_page.clear_preview()
             preview_service.clear()
         event.accept()
 

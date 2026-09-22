@@ -31,7 +31,9 @@ def _dataset():
     )
 
 
-def test_preview_is_verified_cached_and_replaced_for_new_revision(tmp_path, docx_factory):
+def test_preview_is_verified_cached_without_deleting_live_previous_revision(
+    tmp_path, docx_factory
+):
     converter = PdfConverter()
     service = PreviewService(converter, tmp_path / "previews")
     template = inspect_template(docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
@@ -47,4 +49,32 @@ def test_preview_is_verified_cached_and_replaced_for_new_revision(tmp_path, docx
     assert converter.calls == 2
     assert replacement.dataset_revision == changed.revision
     assert replacement.pdf_path.is_file()
-    assert not first.pdf_path.exists()
+    assert first.pdf_path.is_file()
+    assert replacement.pdf_path != first.pdf_path
+
+
+def test_preview_sessions_do_not_share_output_paths(tmp_path, docx_factory):
+    template = inspect_template(docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    plan = MappingPlan({"FULL_NAME": ColumnValue("name")})
+
+    first = PreviewService(PdfConverter(), tmp_path / "previews").generate(
+        _dataset(), "row-1", template, plan
+    )
+    second = PreviewService(PdfConverter(), tmp_path / "previews").generate(
+        _dataset(), "row-1", template, plan
+    )
+
+    assert first.pdf_path != second.pdf_path
+
+
+def test_preview_cleanup_does_not_crash_when_windows_keeps_file_locked(
+    tmp_path, monkeypatch
+):
+    service = PreviewService(PdfConverter(), tmp_path / "previews")
+    service._root.mkdir(parents=True)
+    monkeypatch.setattr(
+        "certificate_automation.preview.shutil.rmtree",
+        lambda _path: (_ for _ in ()).throw(PermissionError("locked")),
+    )
+
+    service.clear()

@@ -87,6 +87,12 @@ class ReviewPage(QWidget):
         self.pdf_document.load(str(path))
         self.preview_status.setText(str(path.name))
 
+    def clear_preview(self) -> None:
+        """Release the current Windows file handle before replacing a preview."""
+
+        self.pdf_document.close()
+        self.preview_status.clear()
+
     def show_preview_error(self, message: str) -> None:
         self.preview_status.setText(message)
 

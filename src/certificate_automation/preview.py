@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
+from uuid import uuid4
 
 from certificate_automation.dataset import TabularDataset
 from certificate_automation.mapping import MappingPlan, evaluate_plan
@@ -28,7 +29,10 @@ class PreviewService:
 
     def __init__(self, converter, root: Path | None = None) -> None:
         self._converter = converter
-        self._root = Path(root or Path(tempfile.gettempdir()) / "certificate-automation-previews")
+        base = Path(
+            root or Path(tempfile.gettempdir()) / "certificate-automation-previews"
+        )
+        self._root = base / uuid4().hex
         self._revision: int | None = None
         self._records: dict[str, PreviewRecord] = {}
 
@@ -41,7 +45,7 @@ class PreviewService:
     ) -> PreviewRecord:
         dataset.row(row_id)
         if self._revision != dataset.revision:
-            self.clear()
+            self._records.clear()
             self._revision = dataset.revision
         key = self._cache_key(dataset, row_id, template, plan)
         cached = self._records.get(key)
@@ -60,8 +64,14 @@ class PreviewService:
 
     def clear(self) -> None:
         if self._root.exists():
-            shutil.rmtree(self._root)
+            try:
+                shutil.rmtree(self._root)
+            except OSError:
+                # Windows may keep a PDF locked briefly while Qt or a viewer
+                # releases it. Temporary data must never block app shutdown.
+                pass
         self._records.clear()
+        self._revision = None
 
     @staticmethod
     def _cache_key(

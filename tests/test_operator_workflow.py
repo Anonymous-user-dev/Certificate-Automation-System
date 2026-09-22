@@ -509,3 +509,36 @@ def test_successful_preview_and_cleanup_use_only_preview_service(
 
     assert shown == [pdf]
     assert cleared == [True]
+
+
+def test_displayed_pdf_is_unloaded_before_preview_regeneration(
+    qtbot, tmp_path, docx_factory, monkeypatch
+):
+    template = inspect_template(docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    services = _services(tmp_path, template.path)
+    pdf = tmp_path / "replacement.pdf"
+    pdf.write_bytes(b"pdf")
+    events = []
+    services.preview_service = SimpleNamespace(
+        generate=lambda *_args: events.append("generate")
+        or SimpleNamespace(pdf_path=pdf),
+        clear=lambda: None,
+    )
+    window = WorkspaceWindow(services)
+    qtbot.addWidget(window)
+    window.project_state = window.project_state.__class__(
+        dataset=_dataset(),
+        template=template,
+        plan=MappingPlan({"FULL_NAME": ColumnValue("name")}),
+    )
+    monkeypatch.setattr(
+        window.review_page,
+        "clear_preview",
+        lambda: events.append("unload"),
+        raising=False,
+    )
+    monkeypatch.setattr(window.review_page, "set_preview", lambda _path: events.append("show"))
+
+    window._generate_preview("row-1")
+
+    assert events == ["unload", "generate", "show"]
