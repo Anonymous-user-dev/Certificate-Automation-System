@@ -22,6 +22,22 @@ def test_packaged_application_starts_offline_and_exits_cleanly(request):
     assert result.returncode == 0
 
 
+def test_packaged_application_imports_qt_and_constructs_workspace(request):
+    executable_value = request.config.getoption("--exe")
+    if not executable_value:
+        pytest.skip("pass --exe to test a packaged application")
+    executable = Path(executable_value)
+    assert executable.is_file(), f"Packaged executable was not found: {executable}"
+
+    result = subprocess.run(
+        [str(executable), "--ui-smoke-test"],
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0
+
+
 def test_packaged_application_contains_all_locale_catalogs(request):
     executable_value = request.config.getoption("--exe")
     if not executable_value:
@@ -45,3 +61,16 @@ def test_packaged_application_contains_offline_examples(request):
 
     assert (examples / "sample_recipients.csv").is_file()
     assert (examples / "sample_certificate_template.docx").is_file()
+
+
+def test_packaged_application_does_not_bundle_foreign_icu_runtime(request):
+    executable_value = request.config.getoption("--exe")
+    if not executable_value:
+        pytest.skip("pass --exe to test a packaged application")
+    internal = Path(executable_value).parent / "_internal"
+
+    bundled_icu = tuple(
+        path.name for path in internal.glob("*.dll") if path.name.lower().startswith("icu")
+    )
+
+    assert bundled_icu == ()

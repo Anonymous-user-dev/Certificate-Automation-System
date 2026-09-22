@@ -29,6 +29,15 @@ analysis = Analysis(
     optimize=1,
 )
 
+# Qt for Windows uses the ICU compatibility libraries supplied by Windows.
+# Build hosts may place an unrelated Poppler ICU runtime on PATH; collecting it
+# beside the application makes QtCore load that incompatible DLL first.
+analysis.binaries = [
+    entry
+    for entry in analysis.binaries
+    if not Path(entry[0]).name.lower().startswith("icu")
+]
+
 pyz = PYZ(analysis.pure)
 
 executable = EXE(

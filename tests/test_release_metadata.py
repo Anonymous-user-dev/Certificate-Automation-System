@@ -9,13 +9,13 @@ from certificate_automation import __version__
 ROOT = Path(__file__).parents[1]
 
 
-def test_release_version_is_consistent_and_is_2_0_0():
+def test_release_version_is_consistent_and_is_2_0_1():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
     installer = (ROOT / "packaging" / "installer.iss").read_text("utf-8")
 
-    assert __version__ == "2.0.0"
+    assert __version__ == "2.0.1"
     assert project["project"]["version"] == __version__
-    assert '#define AppVersion "2.0.0"' in installer
+    assert '#define AppVersion "2.0.1"' in installer
 
 
 def test_locales_and_csv_example_are_declared_for_source_and_windows_packages():
