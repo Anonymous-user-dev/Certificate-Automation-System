@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from PySide6.QtCore import Qt
 from PySide6.QtTest import QSignalSpy
 
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
@@ -128,3 +129,32 @@ def test_language_switch_retranslates_existing_issue_list(qtbot):
     catalogs.set_locale("ru")
 
     assert "обязательное имя" in page.issue_list.item(0).text().casefold()
+
+
+def test_operator_can_rename_selected_column_and_undo(qtbot, monkeypatch):
+    page = DataPage(CatalogSet.load(package_root(), "en"))
+    qtbot.addWidget(page)
+    page.set_dataset(_dataset())
+    original_id = page.model.column_id_at(1)
+    page.table.setCurrentIndex(page.model.index(0, 1))
+    monkeypatch.setattr(
+        "PySide6.QtWidgets.QInputDialog.getText",
+        lambda *_args, **_kwargs: ("Certificate Title", True),
+    )
+
+    qtbot.mouseClick(page.rename_column_button, Qt.MouseButton.LeftButton)
+
+    assert page.model.dataset.columns[1].label == "Certificate Title"
+    assert page.model.dataset.columns[1].column_id == original_id
+    page.model.undo_stack.undo()
+    assert page.model.dataset.columns[1].label == "Award"
+
+
+def test_recipient_source_help_explains_paste_in_plain_language(qtbot):
+    page = DataPage(CatalogSet.load(package_root(), "en"))
+    qtbot.addWidget(page)
+
+    help_text = page.source_help.text().casefold()
+    assert "copy" in help_text
+    assert "heading" in help_text
+    assert "excel" in help_text

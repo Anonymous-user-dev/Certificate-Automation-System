@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -120,6 +121,8 @@ class DataPage(QWidget):
         self.delimited_button = QPushButton()
         self.paste_button = QPushButton()
         self.manual_button = QPushButton()
+        self.source_help = QLabel()
+        self.source_help.setWordWrap(True)
         source_layout = QGridLayout()
         source_layout.addWidget(self.excel_button, 0, 0)
         source_layout.addWidget(self.delimited_button, 0, 1)
@@ -132,6 +135,7 @@ class DataPage(QWidget):
         self.add_row_button = QPushButton()
         self.remove_row_button = QPushButton()
         self.add_column_button = QPushButton()
+        self.rename_column_button = QPushButton()
         self.remove_column_button = QPushButton()
         self.undo_button = QPushButton()
         self.redo_button = QPushButton()
@@ -140,6 +144,7 @@ class DataPage(QWidget):
             self.add_row_button,
             self.remove_row_button,
             self.add_column_button,
+            self.rename_column_button,
             self.remove_column_button,
             self.undo_button,
             self.redo_button,
@@ -163,6 +168,7 @@ class DataPage(QWidget):
         layout.addWidget(self.title)
         layout.addWidget(self.explanation)
         layout.addLayout(source_layout)
+        layout.addWidget(self.source_help)
         summary = QHBoxLayout()
         summary.addWidget(self.source_label)
         summary.addStretch(1)
@@ -183,6 +189,7 @@ class DataPage(QWidget):
         self.add_row_button.clicked.connect(self._add_row)
         self.remove_row_button.clicked.connect(self._remove_selected_rows)
         self.add_column_button.clicked.connect(self._add_column)
+        self.rename_column_button.clicked.connect(self._rename_current_column)
         self.remove_column_button.clicked.connect(self._remove_current_column)
         self.undo_button.clicked.connect(self.model.undo_stack.undo)
         self.redo_button.clicked.connect(self.model.undo_stack.redo)
@@ -239,6 +246,7 @@ class DataPage(QWidget):
             (self.add_row_button, "data.add_row"),
             (self.remove_row_button, "data.remove_row"),
             (self.add_column_button, "data.add_column"),
+            (self.rename_column_button, "data.rename_column"),
             (self.remove_column_button, "data.remove_column"),
             (self.undo_button, "data.undo"),
             (self.redo_button, "data.redo"),
@@ -246,6 +254,7 @@ class DataPage(QWidget):
         )
         self.title.setText(self._catalogs.text("data.title"))
         self.explanation.setText(self._catalogs.text("data.explanation"))
+        self.source_help.setText(self._catalogs.text("data.source_help"))
         for control, key in text_by_control:
             translated = self._catalogs.text(key)
             control.setText(translated)
@@ -296,6 +305,27 @@ class DataPage(QWidget):
                 self.model.remove_column(self.model.column_id_at(index.column()))
             except DatasetError:
                 return
+
+    def _rename_current_column(self) -> None:
+        index = self.table.currentIndex()
+        if not index.isValid():
+            return
+        column_id = self.model.column_id_at(index.column())
+        current_label = self.model.dataset.columns[index.column()].label
+        label, accepted = QInputDialog.getText(
+            self,
+            self._catalogs.text("data.rename_column"),
+            self._catalogs.text("data.rename_column_prompt"),
+            text=current_label,
+        )
+        if not accepted or label.strip() == current_label:
+            return
+        try:
+            self.model.rename_column(column_id, label)
+        except DatasetError as error:
+            code = error.args[0] if error.args else "dataset.blank_column"
+            self.issue_list.clear()
+            self.issue_list.addItem(self._catalogs.text(str(code)))
 
     def _issue_item_activated(self, item: QListWidgetItem) -> None:
         row_id, column_id = item.data(Qt.ItemDataRole.UserRole)

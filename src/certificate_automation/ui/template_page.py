@@ -23,6 +23,8 @@ class TemplatePage(QWidget):
         self.title.setProperty("role", "title")
         self.explanation = QLabel()
         self.explanation.setWordWrap(True)
+        self.field_guide = QLabel()
+        self.field_guide.setWordWrap(True)
         self.choose_button = QPushButton()
         self.file_name = QLabel("—")
         self.hash_label = QLabel("—")
@@ -37,6 +39,7 @@ class TemplatePage(QWidget):
         for widget in (
             self.title,
             self.explanation,
+            self.field_guide,
             self.choose_button,
             self.file_name,
             self.hash_label,
@@ -72,6 +75,7 @@ class TemplatePage(QWidget):
     def retranslate(self) -> None:
         self.title.setText(self._catalogs.text("template.title"))
         self.explanation.setText(self._catalogs.text("template.explanation"))
+        self.field_guide.setText(self._catalogs.text("template.field_guide"))
         self.choose_button.setText(self._catalogs.text("template.choose"))
         self.choose_button.setAccessibleName(self.choose_button.text())
         self.placeholder_list.setAccessibleName(self._catalogs.text("template.placeholders"))

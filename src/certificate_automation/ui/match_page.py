@@ -3,7 +3,16 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QComboBox, QFormLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFormLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
 
 from certificate_automation.dataset import TabularDataset
 from certificate_automation.i18n import CatalogSet
@@ -27,6 +36,8 @@ class MappingCard(QWidget):
         self.dataset = dataset
         self.catalogs = catalogs
         self.label = QLabel(f"{{{{{placeholder}}}}}")
+        self.help_label = QLabel()
+        self.help_label.setWordWrap(True)
         self.type_combo = QComboBox()
         self.type_combo.addItem(catalogs.text("mapping.unresolved"), "unresolved")
         self.type_combo.addItem(catalogs.text("mapping.column"), "column")
@@ -41,22 +52,75 @@ class MappingCard(QWidget):
         self.fixed_input = QLineEdit()
         self.input_format = QLineEdit("%Y-%m-%d")
         self.output_format = QLineEdit("%d %B %Y")
+        self.column_label = QLabel()
+        self.fixed_label = QLabel()
+        self.date_help = QLabel()
+        self.date_help.setWordWrap(True)
+        self.input_format_label = QLabel()
+        self.output_format_label = QLabel()
         layout = QFormLayout(self)
         layout.addRow(self.label, self.type_combo)
-        layout.addRow(catalogs.text("mapping.column"), self.column_combo)
-        layout.addRow(catalogs.text("mapping.fixed"), self.fixed_input)
-        layout.addRow(catalogs.text("mapping.input_format"), self.input_format)
-        layout.addRow(catalogs.text("mapping.output_format"), self.output_format)
-        self.type_combo.currentIndexChanged.connect(self.changed)
+        layout.addRow(self.help_label)
+        layout.addRow(self.column_label, self.column_combo)
+        layout.addRow(self.fixed_label, self.fixed_input)
+        layout.addRow(self.date_help)
+        layout.addRow(self.input_format_label, self.input_format)
+        layout.addRow(self.output_format_label, self.output_format)
+        self.type_combo.currentIndexChanged.connect(self._type_changed)
         self.column_combo.currentIndexChanged.connect(self.changed)
         self.fixed_input.textChanged.connect(self.changed)
         self.input_format.textChanged.connect(self.changed)
         self.output_format.textChanged.connect(self.changed)
+        self.retranslate()
+        self._update_visibility()
+
+    def retranslate(self) -> None:
+        keys = (
+            "mapping.unresolved",
+            "mapping.column",
+            "mapping.fixed",
+            "mapping.sequence",
+            "mapping.source_row",
+            "mapping.formatted_date",
+            "mapping.join",
+        )
+        for index, key in enumerate(keys):
+            self.type_combo.setItemText(index, self.catalogs.text(key))
+        self.help_label.setText(
+            self.catalogs.text("mapping.field_help", field=self.placeholder)
+        )
+        self.column_label.setText(self.catalogs.text("mapping.column"))
+        self.fixed_label.setText(self.catalogs.text("mapping.fixed"))
+        self.date_help.setText(self.catalogs.text("mapping.date_help"))
+        self.input_format_label.setText(self.catalogs.text("mapping.input_format"))
+        self.output_format_label.setText(self.catalogs.text("mapping.output_format"))
         self.type_combo.setAccessibleName(self.label.text())
-        self.column_combo.setAccessibleName(catalogs.text("mapping.column"))
-        self.fixed_input.setAccessibleName(catalogs.text("mapping.fixed"))
-        self.input_format.setAccessibleName(catalogs.text("mapping.input_format"))
-        self.output_format.setAccessibleName(catalogs.text("mapping.output_format"))
+        self.column_combo.setAccessibleName(self.column_label.text())
+        self.fixed_input.setAccessibleName(self.fixed_label.text())
+        self.input_format.setAccessibleName(self.input_format_label.text())
+        self.output_format.setAccessibleName(self.output_format_label.text())
+
+    def _type_changed(self) -> None:
+        self._update_visibility()
+        self.changed.emit()
+
+    def _update_visibility(self) -> None:
+        kind = self.type_combo.currentData()
+        uses_column = kind in {"column", "formatted_date"}
+        is_fixed = kind == "fixed"
+        is_date = kind == "formatted_date"
+        for widget in (self.column_label, self.column_combo):
+            widget.setVisible(uses_column)
+        for widget in (self.fixed_label, self.fixed_input):
+            widget.setVisible(is_fixed)
+        for widget in (
+            self.date_help,
+            self.input_format_label,
+            self.input_format,
+            self.output_format_label,
+            self.output_format,
+        ):
+            widget.setVisible(is_date)
 
     def set_column(self, column_id_or_label: str) -> None:
         for index in range(self.column_combo.count()):
@@ -151,6 +215,8 @@ class MatchPage(QWidget):
     def retranslate(self) -> None:
         self.title.setText(self._catalogs.text("mapping.title"))
         self.explanation.setText(self._catalogs.text("mapping.explanation"))
+        for card in self.cards.values():
+            card.retranslate()
         self.continue_button.setText(self._catalogs.text("action.continue"))
         self.continue_button.setAccessibleName(self.continue_button.text())
 

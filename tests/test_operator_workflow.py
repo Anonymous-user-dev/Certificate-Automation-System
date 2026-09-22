@@ -164,6 +164,33 @@ def test_mapping_page_exposes_explicit_formatted_date_source(qtbot, tmp_path):
     assert source.input_format == "%Y-%m-%d"
 
 
+def test_custom_template_field_needs_no_code_change_and_mapping_stays_simple(
+    qtbot, tmp_path, docx_factory
+):
+    template = inspect_template(
+        docx_factory(paragraph_runs=[["Employee ID: {{EMPLOYEE_ID}}"]])
+    )
+    services = _services(tmp_path, template.path)
+    window = WorkspaceWindow(services)
+    qtbot.addWidget(window)
+    window.template_page.set_inspection(template)
+    window.match_page.set_context(_dataset(), template.names)
+
+    assert "{{EMPLOYEE_ID}}" in window.template_page.placeholder_list.item(0).text()
+    assert "{{FIELD_NAME}}" in window.template_page.field_guide.text()
+    assert "EMPLOYEE_ID" in window.match_page.cards
+    assert "{{FIELD_NAME}}" in window.match_page.explanation.text()
+
+    card = window.match_page.cards["EMPLOYEE_ID"]
+    assert card.input_format.isHidden()
+    assert card.output_format.isHidden()
+    card.type_combo.setCurrentIndex(card.type_combo.findData("formatted_date"))
+    assert not card.input_format.isHidden()
+    assert not card.output_format.isHidden()
+    assert "2026-09-22" in card.input_format_label.text()
+    assert "22 September 2026" in card.output_format_label.text()
+
+
 def test_generation_rejects_template_changed_after_review(qtbot, tmp_path, docx_factory):
     template_path = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
     services = _services(tmp_path, template_path)
