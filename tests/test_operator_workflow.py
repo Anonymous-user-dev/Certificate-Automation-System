@@ -403,10 +403,11 @@ def test_preview_failures_and_published_result_links_stay_inside_verified_paths(
     output.mkdir()
     for name in ("manifest.json", "batch_summary.html", "Awards.pdf"):
         (output / name).write_bytes(b"x")
-    window.results_page.result = BatchResult(BatchState.PUBLISHED, output, 2)
-    window.project_state = window.project_state.__class__(
-        dataset=_dataset(),
-        outputs=OutputOptions(True, False, True, tmp_path, "Awards", _dataset().order),
+    window.results_page.result = BatchResult(
+        BatchState.PUBLISHED,
+        output,
+        2,
+        combined_pdf_path=output / "Awards.pdf",
     )
     window._open_published_output()
     window._open_result_file("manifest.json")

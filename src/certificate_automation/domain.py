@@ -70,3 +70,4 @@ class BatchResult:
     output_dir: Path | None = None
     generated_count: int = 0
     issues: tuple[Issue, ...] = field(default_factory=tuple)
+    combined_pdf_path: Path | None = None

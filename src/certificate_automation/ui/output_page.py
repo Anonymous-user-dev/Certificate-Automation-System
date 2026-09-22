@@ -5,7 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from certificate_automation.i18n import CatalogSet
 from certificate_automation.output_options import OutputOptions
@@ -24,7 +34,13 @@ class OutputPage(QWidget):
         self.docx = QCheckBox()
         self.docx.setChecked(True)
         self.individual_pdf = QCheckBox()
+        self.individual_pdf.setChecked(True)
         self.combined_pdf = QCheckBox()
+        self.word_status = QLabel()
+        self.word_status.setWordWrap(True)
+        self.summary_label = QLabel()
+        self.summary_label.setWordWrap(True)
+        self._word_availability: WordAvailability | None = None
         self.destination = QLineEdit()
         self.browse_button = QPushButton()
         self.batch_name = QLineEdit()
@@ -42,6 +58,8 @@ class OutputPage(QWidget):
         layout.addWidget(self.docx)
         layout.addWidget(self.individual_pdf)
         layout.addWidget(self.combined_pdf)
+        layout.addWidget(self.word_status)
+        layout.addWidget(self.summary_label)
         layout.addLayout(destination_row)
         layout.addWidget(self.batch_name)
         layout.addWidget(self.order_list)
@@ -49,6 +67,8 @@ class OutputPage(QWidget):
         layout.addWidget(self.continue_button)
         self.browse_button.clicked.connect(self._browse)
         self.continue_button.clicked.connect(self._accept)
+        for control in (self.docx, self.individual_pdf, self.combined_pdf):
+            control.toggled.connect(self._update_summary)
         catalogs.subscribe(lambda _locale: self.retranslate())
         self.retranslate()
 
@@ -56,6 +76,7 @@ class OutputPage(QWidget):
         self._order = tuple(order)
         self.order_list.clear()
         self.order_list.addItems(self._order)
+        self._update_summary()
 
     def options(self, generation_order: tuple[str, ...] | None = None) -> OutputOptions:
         return OutputOptions(
@@ -68,9 +89,14 @@ class OutputPage(QWidget):
         )
 
     def set_word_availability(self, availability: WordAvailability) -> None:
+        self._word_availability = availability
         for control in (self.individual_pdf, self.combined_pdf):
             control.setEnabled(availability.available)
             control.setToolTip("" if availability.available else availability.message)
+            if not availability.available:
+                control.setChecked(False)
+        self._update_word_status()
+        self._update_summary()
 
     def retranslate(self) -> None:
         previous_default = self._last_default_batch_name
@@ -93,6 +119,33 @@ class OutputPage(QWidget):
         self.destination.setAccessibleName(self._catalogs.text("output.destination"))
         self.batch_name.setAccessibleName(self._catalogs.text("output.batch_name"))
         self.order_list.setAccessibleName(self._catalogs.text("output.order"))
+        self._update_word_status()
+        self._update_summary()
+
+    def _update_word_status(self) -> None:
+        availability = self._word_availability
+        if availability is None:
+            self.word_status.setText(self._catalogs.text("output.word_requirement"))
+        elif availability.available:
+            self.word_status.setText(self._catalogs.text("output.word_available"))
+        else:
+            self.word_status.setText(
+                self._catalogs.text(
+                    "output.word_unavailable",
+                    reason=availability.message,
+                )
+            )
+
+    def _update_summary(self) -> None:
+        recipients = len(self._order)
+        self.summary_label.setText(
+            self._catalogs.text(
+                "output.summary",
+                docx=recipients if self.docx.isChecked() else 0,
+                pdf=recipients if self.individual_pdf.isChecked() else 0,
+                combined=1 if self.combined_pdf.isChecked() else 0,
+            )
+        )
 
     def _browse(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, self._catalogs.text("output.destination"))

@@ -81,7 +81,7 @@ class ResultsPage(QWidget):
         output_dir = result.output_dir
         self.open_output_button.setEnabled(bool(output_dir and output_dir.is_dir()))
         self.open_combined_button.setEnabled(
-            bool(output_dir and any(output_dir.glob("*.pdf")))
+            bool(result.combined_pdf_path and result.combined_pdf_path.is_file())
         )
         self.open_summary_button.setEnabled(
             bool(output_dir and (output_dir / "batch_summary.html").is_file())
@@ -98,6 +98,9 @@ class ResultsPage(QWidget):
         self.cancel_button.setEnabled(False)
         self._enable_results(False)
         self.status_label.setText(str(error))
+
+    def show_open_error(self) -> None:
+        self.status_label.setText(self._catalogs.text("results.open_combined_failed"))
 
     def retranslate(self) -> None:
         self.title.setText(self._catalogs.text("results.title"))

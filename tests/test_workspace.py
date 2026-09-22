@@ -7,7 +7,9 @@ from PySide6.QtWidgets import QAbstractButton, QComboBox, QLineEdit, QTableView
 import pytest
 
 from certificate_automation.i18n import CatalogSet, package_root
+from certificate_automation.domain import BatchResult, BatchState
 from certificate_automation.ui.workspace import WorkspaceWindow
+from certificate_automation.word import WordAvailability
 
 
 @pytest.fixture
@@ -98,3 +100,55 @@ def test_default_batch_name_retranslates_without_overwriting_operator_edit(works
     workspace.output_page.batch_name.setText("2026 Scholarship Awards")
     workspace.set_locale("ru")
     assert workspace.output_page.batch_name.text() == "2026 Scholarship Awards"
+
+
+def test_output_defaults_to_word_and_individual_pdf_with_plain_count_summary(workspace):
+    page = workspace.output_page
+    page.set_order(("row-1", "row-2", "row-3"))
+
+    assert page.docx.isChecked()
+    assert page.individual_pdf.isChecked()
+    assert not page.combined_pdf.isChecked()
+    assert "3 Word" in page.summary_label.text()
+    assert "3 individual PDF" in page.summary_label.text()
+    assert "0 combined PDF" in page.summary_label.text()
+
+    page.combined_pdf.setChecked(True)
+    assert "1 combined PDF" in page.summary_label.text()
+
+
+def test_unavailable_word_clears_pdf_choices_and_explains_why(workspace):
+    page = workspace.output_page
+    page.combined_pdf.setChecked(True)
+
+    page.set_word_availability(WordAvailability(False, "Microsoft Word was not found"))
+
+    assert not page.individual_pdf.isChecked()
+    assert not page.combined_pdf.isChecked()
+    assert not page.individual_pdf.isEnabled()
+    assert "Microsoft Word was not found" in page.word_status.text()
+
+
+def test_results_enable_combined_action_only_for_exact_combined_artifact(
+    workspace, tmp_path
+):
+    output = tmp_path / "published"
+    output.mkdir()
+    (output / "Ana.pdf").write_bytes(b"individual")
+
+    workspace.results_page.set_published(
+        BatchResult(BatchState.PUBLISHED, output, 1)
+    )
+    assert not workspace.results_page.open_combined_button.isEnabled()
+
+    combined = output / "Print Batch.pdf"
+    combined.write_bytes(b"combined")
+    workspace.results_page.set_published(
+        BatchResult(
+            BatchState.PUBLISHED,
+            output,
+            1,
+            combined_pdf_path=combined,
+        )
+    )
+    assert workspace.results_page.open_combined_button.isEnabled()

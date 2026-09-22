@@ -567,6 +567,11 @@ class BatchGenerator:
                 output_dir=final_directory,
                 generated_count=total,
                 issues=report.issues,
+                combined_pdf_path=(
+                    final_directory / combined.path.name
+                    if combined is not None
+                    else None
+                ),
             )
         except Exception as error:
             diagnostic_path = self._retain_incomplete(staging, batch_id, error)

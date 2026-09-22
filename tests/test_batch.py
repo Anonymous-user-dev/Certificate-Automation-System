@@ -247,6 +247,8 @@ def test_combined_only_publishes_one_ordered_pdf_and_no_temporary_formats(tmp_pa
     result = _generator(FakeConverter()).generate(request)
 
     assert [path.name for path in result.output_dir.glob("*.pdf")] == ["Awards.pdf"]
+    assert result.combined_pdf_path == result.output_dir / "Awards.pdf"
+    assert result.combined_pdf_path.is_file()
     assert not list(result.output_dir.glob("*.docx"))
     manifest = json.loads((result.output_dir / "manifest.json").read_text("utf-8"))
     assert manifest["schema_version"] == 2

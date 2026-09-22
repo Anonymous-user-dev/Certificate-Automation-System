@@ -855,12 +855,16 @@ class WorkspaceWindow(QMainWindow):
 
     def _open_combined_output(self) -> None:
         result = getattr(self.results_page, "result", None)
-        outputs = self.project_state.outputs
         opener = getattr(self.services, "open_path", None)
-        if result and result.output_dir and outputs and callable(opener):
-            path = result.output_dir / f"{outputs.batch_name}.pdf"
-            if path.is_file():
-                opener(path)
+        path = result.combined_pdf_path if result else None
+        if not (result and result.output_dir and path and callable(opener)):
+            return
+        try:
+            is_published_artifact = path.resolve().parent == result.output_dir.resolve()
+        except OSError:
+            is_published_artifact = False
+        if not is_published_artifact or not path.is_file() or not opener(path):
+            self.results_page.show_open_error()
 
     def closeEvent(self, event) -> None:
         if self._thread is not None:
