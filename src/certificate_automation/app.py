@@ -25,6 +25,7 @@ from certificate_automation.importers.delimited import import_delimited, inspect
 from certificate_automation.importers.excel import import_excel, inspect_excel
 from certificate_automation.mapping import MappingSelection, suggest_mappings
 from certificate_automation.project import ProjectStore
+from certificate_automation.preview import PreviewService
 from certificate_automation.recovery import RecoveryService
 from certificate_automation.template import (
     TemplateInspection,
@@ -96,6 +97,8 @@ class ApplicationServices:
     import_clipboard: Callable | None = None
     create_manual_dataset: Callable | None = None
     open_project: Callable[[Path], ProjectStore] | None = None
+    word_availability: Callable | None = None
+    preview_service: PreviewService | None = None
 
 
 def create_default_services(locale: str = "en") -> ApplicationServices:
@@ -141,6 +144,8 @@ def create_default_services(locale: str = "en") -> ApplicationServices:
         import_clipboard=import_clipboard,
         create_manual_dataset=create_manual_dataset,
         open_project=ProjectStore.open,
+        word_availability=converter.is_available,
+        preview_service=PreviewService(converter),
     )
 
 

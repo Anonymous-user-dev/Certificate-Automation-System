@@ -13,6 +13,7 @@ from certificate_automation.word import (
     PermanentWordError,
     TransientWordError,
     WordPdfConverter,
+    WordAvailability,
 )
 
 
@@ -174,3 +175,5 @@ def test_gateway_reports_when_word_com_registration_is_missing(monkeypatch):
 
     assert availability.available is False
     assert "not installed" in availability.message
+    assert isinstance(availability, WordAvailability)
+    assert availability.code == "word.not_available"

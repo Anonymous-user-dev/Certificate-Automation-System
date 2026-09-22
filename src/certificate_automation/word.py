@@ -11,9 +11,13 @@ from typing import Callable, Protocol
 
 
 @dataclass(frozen=True, slots=True)
-class Availability:
+class WordAvailability:
     available: bool
     message: str
+    code: str = "word.available"
+
+
+Availability = WordAvailability
 
 
 class PdfConverter(Protocol):
@@ -163,18 +167,20 @@ class ComWordGateway:
 
     def availability(self) -> Availability:
         if platform.system() != "Windows":
-            return Availability(
+            return WordAvailability(
                 False,
                 "PDF conversion requires the Windows desktop version of Microsoft Word.",
+                "word.windows_required",
             )
         try:
             import pythoncom  # noqa: F401
             import winreg
             import win32com.client  # noqa: F401
         except ImportError:
-            return Availability(
+            return WordAvailability(
                 False,
                 "The Microsoft Word automation component is not installed.",
+                "word.component_missing",
             )
         try:
             with winreg.OpenKey(
@@ -185,12 +191,13 @@ class ComWordGateway:
             if not str(clsid).strip():
                 raise OSError("Word.Application has an empty CLSID registration.")
         except OSError:
-            return Availability(
+            return WordAvailability(
                 False,
                 "Desktop Microsoft Word is not installed or its automation "
                 "registration is damaged.",
+                "word.not_available",
             )
-        return Availability(True, "Microsoft Word automation is available.")
+        return WordAvailability(True, "Microsoft Word automation is available.")
 
     def convert_once(  # pragma: no cover - exercised by Windows Word integration
         self,

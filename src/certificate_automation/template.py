@@ -25,6 +25,10 @@ MAX_UNCOMPRESSED_SIZE = 100 * 1024 * 1024
 class TemplateInputError(ValueError):
     """Raised when a template is damaged or contains invalid placeholders."""
 
+    def __init__(self, message: str, *, code: str = "template.invalid") -> None:
+        super().__init__(message)
+        self.code = code
+
 
 class TemplateRenderError(ValueError):
     """Raised when a template cannot be rendered safely."""
@@ -45,6 +49,9 @@ class TemplateInspection:
 
     path: Path
     placeholders: tuple[Placeholder, ...]
+    sha256: str = ""
+    protected: bool = False
+    preview_page_count: int | None = None
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -61,7 +68,23 @@ def inspect_template(path: Path) -> TemplateInspection:
     """Discover valid placeholders in all supported Word story parts."""
 
     path = Path(path)
+    if path.suffix.casefold() != ".docx":
+        raise TemplateInputError(
+            "Choose a macro-free .docx Word template.",
+            code="template.unsupported_type",
+        )
     members = _read_package(path)
+    member_names = {info.filename for info, _data in members}
+    if any(name.casefold().endswith("vbaproject.bin") for name in member_names):
+        raise TemplateInputError(
+            "The Word template contains macros and cannot be used safely.",
+            code="template.macros_present",
+        )
+    if _has_editing_protection(members):
+        raise TemplateInputError(
+            "The Word template is protected against editing.",
+            code="template.protected",
+        )
     found: OrderedDict[str, _PlaceholderAccumulator] = OrderedDict()
 
     for part_name, data in _story_parts(members):
@@ -93,7 +116,28 @@ def inspect_template(path: Path) -> TemplateInspection:
             Placeholder(name, item.occurrences, tuple(item.parts))
             for name, item in found.items()
         ),
+        sha256=_sha256_file(path),
     )
+
+
+def _has_editing_protection(members: Iterable[tuple[object, bytes]]) -> bool:
+    for info, data in members:
+        if info.filename != "word/settings.xml":
+            continue
+        root = _parse_xml(data, Path("settings.xml"))
+        if root.find(f".//{{{WORD_NAMESPACE}}}documentProtection") is not None:
+            return True
+    return False
+
+
+def _sha256_file(path: Path) -> str:
+    from hashlib import sha256
+
+    digest = sha256()
+    with Path(path).open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def render_template(

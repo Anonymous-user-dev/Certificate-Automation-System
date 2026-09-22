@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 from docx import Document
@@ -147,3 +147,32 @@ def test_invalid_docx_has_plain_language_error(tmp_path):
 
     with pytest.raises(TemplateInputError, match="could not be read"):
         inspect_template(source)
+
+
+def test_unsupported_macro_template_has_stable_error_code(tmp_path):
+    source = tmp_path / "unsafe.docm"
+    source.write_bytes(b"not opened")
+
+    with pytest.raises(TemplateInputError) as caught:
+        inspect_template(source)
+
+    assert caught.value.code == "template.unsupported_type"
+
+
+def test_protected_template_is_rejected(docx_factory, tmp_path):
+    source = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
+    protected = tmp_path / "protected.docx"
+    with ZipFile(source) as incoming, ZipFile(protected, "w", ZIP_DEFLATED) as outgoing:
+        for member in incoming.infolist():
+            payload = incoming.read(member.filename)
+            if member.filename == "word/settings.xml":
+                payload = payload.replace(
+                    b"</w:settings>",
+                    b'<w:documentProtection w:edit="readOnly" w:enforcement="1"/></w:settings>',
+                )
+            outgoing.writestr(member, payload)
+
+    with pytest.raises(TemplateInputError) as caught:
+        inspect_template(protected)
+
+    assert caught.value.code == "template.protected"

@@ -7,9 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
-from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtCore import QSettings, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QApplication,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -17,6 +18,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
+    QInputDialog,
     QPushButton,
     QScrollArea,
     QStackedWidget,
@@ -26,10 +29,19 @@ from PySide6.QtWidgets import (
 )
 
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
+from certificate_automation.batch import BatchRequest, CancellationToken
 from certificate_automation.i18n import CatalogSet, SUPPORTED_LOCALES, package_root
+from certificate_automation.mapping import MappingPlan
+from certificate_automation.output_options import OutputOptions
 from certificate_automation.project import ProjectStore
-from certificate_automation.ui.data_page import DataPage
+from certificate_automation.ui.data_page import DataPage, ImportPreviewDialog
+from certificate_automation.ui.match_page import MatchPage
+from certificate_automation.ui.output_page import OutputPage
+from certificate_automation.ui.results_page import ResultsPage
+from certificate_automation.ui.review_page import ReviewPage
+from certificate_automation.ui.template_page import TemplatePage
 from certificate_automation.ui.theme import application_stylesheet
+from certificate_automation.ui.worker import GenerationWorker
 
 
 STEP_IDS = ("data", "template", "mapping", "review", "output", "generate")
@@ -49,6 +61,15 @@ class WorkspaceState:
     completed_steps: tuple[str, ...] = ()
     project_path: Path | None = None
     project_revision: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorProjectState:
+    dataset: TabularDataset | None = None
+    template: object | None = None
+    plan: MappingPlan | None = None
+    outputs: OutputOptions | None = None
+    warning_ack_revision: int | None = None
 
 
 class HomePage(QWidget):
@@ -214,8 +235,13 @@ class WorkspaceWindow(QMainWindow):
         if self.catalogs.locale != configured_locale:
             self.catalogs.set_locale(configured_locale)
         self.state = WorkspaceState()
+        self.project_state = OperatorProjectState()
         self._page_by_step: dict[str, QWidget] = {}
         self._last_issue_code: str | None = None
+        self._thread: QThread | None = None
+        self._worker = None
+        self.cancellation: CancellationToken | None = None
+        self._close_when_idle = False
 
         self.home = HomePage(self.catalogs)
         self.root_stack = QStackedWidget()
@@ -236,7 +262,27 @@ class WorkspaceWindow(QMainWindow):
         self.next_button.clicked.connect(self._go_next)
         self.locale_selector.currentIndexChanged.connect(self._locale_selected)
         self.data_page.dataset_accepted.connect(self._accept_data)
+        self.data_page.import_requested.connect(self._import_source)
+        self.data_page.paste_requested.connect(self._paste_source)
         self.data_page.model.dataset_changed.connect(self._data_changed)
+        self.template_page.template_selected.connect(self._select_template)
+        self.template_page.inspection_accepted.connect(self._accept_template)
+        self.match_page.plan_accepted.connect(self._accept_plan)
+        self.review_page.review_accepted.connect(self._accept_review)
+        self.review_page.issue_activated.connect(self._focus_issue)
+        self.review_page.warnings_acknowledged.connect(self._acknowledge_warnings)
+        self.review_page.preview_requested.connect(self._generate_preview)
+        self.output_page.options_accepted.connect(self._accept_outputs)
+        self.results_page.generate_requested.connect(self.start_generation)
+        self.results_page.cancel_requested.connect(self._request_cancel)
+        self.results_page.open_output_requested.connect(self._open_published_output)
+        self.results_page.open_combined_requested.connect(self._open_combined_output)
+        self.results_page.open_summary_requested.connect(
+            lambda: self._open_result_file("batch_summary.html")
+        )
+        self.results_page.open_manifest_requested.connect(
+            lambda: self._open_result_file("manifest.json")
+        )
         self.catalogs.subscribe(self._locale_changed)
         self.retranslate()
         self._ensure_accessible_names()
@@ -284,8 +330,19 @@ class WorkspaceWindow(QMainWindow):
         self.data_page = DataPage(self.catalogs)
         self._page_by_step["data"] = self.data_page
         self.page_stack.addWidget(self.data_page)
-        for step in STEP_IDS[1:]:
-            page = self._placeholder_page(STEP_KEYS[step])
+        self.template_page = TemplatePage(self.catalogs)
+        self.match_page = MatchPage(self.catalogs)
+        self.review_page = ReviewPage(self.catalogs)
+        self.output_page = OutputPage(self.catalogs)
+        self.results_page = ResultsPage(self.catalogs)
+        pages = {
+            "template": self.template_page,
+            "mapping": self.match_page,
+            "review": self.review_page,
+            "output": self.output_page,
+            "generate": self.results_page,
+        }
+        for step, page in pages.items():
             self._page_by_step[step] = page
             self.page_stack.addWidget(page)
         scroll = QScrollArea()
@@ -337,6 +394,7 @@ class WorkspaceWindow(QMainWindow):
         )
         self.data_page.set_dataset(dataset)
         self.state = WorkspaceState(current_step="data")
+        self.project_state = OperatorProjectState(dataset=dataset)
         self.banner.clear()
         self.root_stack.setCurrentWidget(self.workspace_surface)
         self._show_step("data")
@@ -346,6 +404,7 @@ class WorkspaceWindow(QMainWindow):
         store = opener(Path(path)) if callable(opener) else ProjectStore.open(Path(path))
         project = store.load()
         self.data_page.set_dataset(project.dataset)
+        self.project_state = OperatorProjectState(dataset=project.dataset)
         self.state = WorkspaceState(
             current_step=project.active_step if project.active_step in STEP_IDS else "data",
             completed_steps=tuple(
@@ -417,13 +476,6 @@ class WorkspaceWindow(QMainWindow):
         self.next_button.setText(self.catalogs.text("action.continue"))
         self.next_button.setAccessibleName(self.catalogs.text("action.continue"))
         self.step_rail.retranslate()
-        for step, page in self._page_by_step.items():
-            if step == "data":
-                continue
-            title = page.findChild(QLabel, "placeholderTitle")
-            explanation = page.findChild(QLabel, "placeholderExplanation")
-            title.setText(self.catalogs.text(STEP_KEYS[step]))
-            explanation.setText(self.catalogs.text("workspace.step_placeholder"))
         if self.banner.issue_code:
             self.banner.show_issue(
                 self.banner.issue_code,
@@ -448,19 +500,392 @@ class WorkspaceWindow(QMainWindow):
         self.next_button.setEnabled(index < len(STEP_IDS) - 1)
 
     def _accept_data(self, _dataset: TabularDataset) -> None:
+        self.project_state = replace(self.project_state, dataset=_dataset)
         self.mark_step_complete("data")
         self.navigate("template")
+
+    def _import_source(self, kind: str) -> None:
+        if kind == "manual":
+            creator = getattr(self.services, "create_manual_dataset", None)
+            if callable(creator):
+                self.data_page.set_dataset(
+                    creator((self.catalogs.text("data.default_column"),))
+                )
+            return
+        if kind == "excel":
+            selected, _ = QFileDialog.getOpenFileName(
+                self,
+                self.catalogs.text("import.excel"),
+                "",
+                "Excel (*.xlsx)",
+            )
+            if selected:
+                self._import_excel_file(Path(selected))
+            return
+        if kind == "delimited":
+            selected, _ = QFileDialog.getOpenFileName(
+                self,
+                self.catalogs.text("import.csv"),
+                "",
+                "CSV / TSV (*.csv *.tsv *.txt)",
+            )
+            if selected:
+                self._import_delimited_file(Path(selected))
+
+    def _import_excel_file(self, path: Path) -> None:
+        try:
+            inspect = self.services.inspect_excel(path)
+            sheet = inspect.sheet_name
+            if len(inspect.sheet_names) > 1:
+                sheet, accepted = QInputDialog.getItem(
+                    self,
+                    self.catalogs.text("import.excel"),
+                    self.catalogs.text("import.excel.worksheet"),
+                    inspect.sheet_names,
+                    inspect.sheet_names.index(sheet),
+                    False,
+                )
+                if not accepted:
+                    return
+                inspect = self.services.inspect_excel(path, sheet)
+            include_hidden = False
+            if inspect.requires_hidden_data_choice:
+                answer = QMessageBox.question(
+                    self,
+                    self.catalogs.text("import.excel"),
+                    self.catalogs.text("import.excel.hidden_choice"),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                include_hidden = answer == QMessageBox.StandardButton.Yes
+            dataset = self.services.import_excel(
+                path,
+                inspect.sheet_name,
+                include_hidden=include_hidden,
+            )
+            self._confirm_import(
+                dataset,
+                encoding="—",
+                delimiter="—",
+                worksheet=inspect.sheet_name,
+                hidden_policy=("included" if include_hidden else "excluded"),
+            )
+        except Exception as error:
+            self._show_import_error(error)
+
+    def _import_delimited_file(self, path: Path) -> None:
+        try:
+            inspect = self.services.inspect_delimited(path)
+            encoding = inspect.encoding
+            delimiter = inspect.delimiter
+            if encoding is None:
+                encoding, accepted = QInputDialog.getItem(
+                    self,
+                    self.catalogs.text("import.csv"),
+                    self.catalogs.text("import.encoding"),
+                    inspect.encoding_candidates,
+                    0,
+                    False,
+                )
+                if not accepted:
+                    return
+            if delimiter is None:
+                labels = {",": "comma (,)", "\t": "tab", ";": "semicolon (;)"}
+                choices = tuple(labels[item] for item in inspect.delimiter_candidates)
+                choice, accepted = QInputDialog.getItem(
+                    self,
+                    self.catalogs.text("import.csv"),
+                    self.catalogs.text("import.delimiter"),
+                    choices,
+                    0,
+                    False,
+                )
+                if not accepted:
+                    return
+                delimiter = next(item for item, label in labels.items() if label == choice)
+            dataset = self.services.import_delimited(path, encoding, delimiter)
+            self._confirm_import(
+                dataset,
+                encoding=str(encoding),
+                delimiter="TAB" if delimiter == "\t" else str(delimiter),
+                worksheet="—",
+                hidden_policy="—",
+            )
+        except Exception as error:
+            self._show_import_error(error)
+
+    def _paste_source(self) -> None:
+        try:
+            text = QApplication.clipboard().text()
+            inspect = self.services.inspect_clipboard(text)
+            mode = inspect.mode
+            if mode is None:
+                mode, accepted = QInputDialog.getItem(
+                    self,
+                    self.catalogs.text("import.clipboard"),
+                    self.catalogs.text("import.clipboard.mode"),
+                    inspect.mode_candidates,
+                    0,
+                    False,
+                )
+                if not accepted:
+                    return
+            dataset = self.services.import_clipboard(text, mode)
+            self._confirm_import(
+                dataset,
+                encoding="UTF-8",
+                delimiter="TAB" if mode == "tabs" else ",",
+                worksheet="—",
+                hidden_policy="—",
+            )
+        except Exception as error:
+            self._show_import_error(error)
+
+    def _confirm_import(
+        self,
+        dataset: TabularDataset,
+        *,
+        encoding: str,
+        delimiter: str,
+        worksheet: str,
+        hidden_policy: str,
+    ) -> None:
+        rows = (tuple(column.label for column in dataset.columns),) + tuple(
+            tuple(row.value(column.column_id) for column in dataset.columns)
+            for row in dataset.rows[:9]
+        )
+        dialog = ImportPreviewDialog(self.catalogs, self)
+        dialog.set_preview(
+            rows=rows,
+            encoding=encoding,
+            delimiter=delimiter,
+            worksheet=worksheet,
+            hidden_policy=hidden_policy,
+        )
+        if dialog.exec():
+            self.data_page.set_dataset(dataset)
+
+    def _show_import_error(self, error: Exception) -> None:
+        code = getattr(error, "code", "import.failed")
+        parameters = dict(getattr(error, "parameters", {}))
+        self.banner.show_issue(code, self.catalogs.text(code, **parameters))
 
     def _data_changed(self, _dataset: TabularDataset) -> None:
         if not hasattr(self, "save_state_label"):
             return
         completed = tuple(step for step in self.state.completed_steps if step == "data")
+        self.project_state = replace(
+            self.project_state,
+            dataset=_dataset,
+            plan=None,
+            outputs=None,
+            warning_ack_revision=None,
+        )
         self.state = replace(
             self.state,
             completed_steps=completed,
             project_revision=self.state.project_revision + 1,
         )
         self.save_state_label.setText(self.catalogs.text("workspace.unsaved"))
+
+    def _select_template(self, path: Path) -> None:
+        try:
+            inspection = self.services.inspect_template(Path(path))
+        except Exception as error:
+            self.template_page.show_template_error(
+                getattr(error, "code", "template.invalid")
+            )
+            return
+        self.template_page.set_inspection(inspection)
+
+    def _accept_template(self, inspection) -> None:
+        self.project_state = replace(
+            self.project_state,
+            template=inspection,
+            plan=None,
+            outputs=None,
+            warning_ack_revision=None,
+        )
+        self.match_page.set_context(
+            self.project_state.dataset,
+            inspection.names,
+        )
+        self.mark_step_complete("template")
+        self.navigate("mapping")
+
+    def _accept_plan(self, plan: MappingPlan) -> None:
+        self.project_state = replace(
+            self.project_state,
+            plan=plan,
+            outputs=None,
+            warning_ack_revision=None,
+        )
+        self.review_page.set_context(self.project_state.dataset, plan)
+        self.mark_step_complete("mapping")
+        self.navigate("review")
+
+    def _accept_review(self) -> None:
+        self.output_page.set_order(self.project_state.dataset.order)
+        availability = getattr(self.services, "word_availability", None)
+        if callable(availability):
+            self.output_page.set_word_availability(availability())
+        self.mark_step_complete("review")
+        self.navigate("output")
+
+    def _accept_outputs(self, outputs: OutputOptions) -> None:
+        self.project_state = replace(self.project_state, outputs=outputs)
+        self.mark_step_complete("output")
+        self.navigate("generate")
+
+    def _focus_issue(self, row_id: str, column_id: str) -> None:
+        self._show_step("data")
+        self.data_page.focus_cell(row_id, column_id)
+
+    def _acknowledge_warnings(self) -> None:
+        dataset = self.project_state.dataset
+        self.project_state = replace(
+            self.project_state,
+            warning_ack_revision=dataset.revision if dataset else None,
+        )
+
+    def _generate_preview(self, row_id: str) -> None:
+        current = self.project_state
+        service = getattr(self.services, "preview_service", None)
+        if service is None or not all((current.dataset, current.template, current.plan)):
+            self.review_page.show_preview_error(
+                self.catalogs.text("review.preview_unavailable")
+            )
+            return
+        try:
+            record = service.generate(
+                current.dataset,
+                row_id,
+                current.template,
+                current.plan,
+            )
+        except Exception as error:
+            self.review_page.show_preview_error(str(error))
+            return
+        self.review_page.set_preview(record.pdf_path)
+
+    def start_generation(self) -> None:
+        if self._thread is not None:
+            return
+        current = self.project_state
+        if not all((current.dataset, current.template, current.plan, current.outputs)):
+            self.banner.show_issue(
+                "navigation.complete_previous",
+                self.catalogs.text("navigation.complete_previous"),
+            )
+            return
+        report = self.services.validate(
+            current.dataset,
+            current.template,
+            current.plan,
+            current.outputs,
+        )
+        if report.dataset_revision != current.dataset.revision:
+            self.banner.show_issue(
+                "validation.revision_changed",
+                self.catalogs.text("validation.revision_changed"),
+            )
+            return
+        if report.template_sha256 != current.template.sha256:
+            self.project_state = replace(
+                self.project_state,
+                template=None,
+                plan=None,
+                outputs=None,
+                warning_ack_revision=None,
+            )
+            self.banner.show_issue(
+                "validation.template_changed",
+                self.catalogs.text("validation.template_changed"),
+            )
+            self._show_step("template")
+            return
+        if not report.ready:
+            self.review_page.set_issues(report.issues)
+            self._show_step("review")
+            return
+        request = BatchRequest(
+            current.dataset,
+            current.template,
+            current.plan,
+            current.outputs,
+            self.catalogs.locale,
+        )
+        self.cancellation = CancellationToken()
+        self.results_page.set_running()
+        thread = QThread(self)
+        worker = GenerationWorker(
+            self.services.batch_generator,
+            request,
+            self.cancellation,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self.results_page.update_progress)
+        worker.finished.connect(self._generation_finished)
+        worker.failed.connect(self._generation_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(self._thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._thread, self._worker = thread, worker
+        thread.start()
+
+    def _generation_finished(self, result) -> None:
+        self.results_page.set_published(result)
+
+    def _generation_failed(self, error) -> None:
+        self.results_page.set_failed(error)
+
+    def _thread_finished(self) -> None:
+        self._thread = None
+        self._worker = None
+        if self._close_when_idle:
+            self._close_when_idle = False
+            QTimer.singleShot(0, self.close)
+
+    def _request_cancel(self) -> None:
+        if self.cancellation is not None:
+            self.cancellation.request()
+
+    def _open_published_output(self) -> None:
+        result = getattr(self.results_page, "result", None)
+        opener = getattr(self.services, "open_path", None)
+        if result and result.output_dir and callable(opener):
+            opener(result.output_dir)
+
+    def _open_result_file(self, name: str) -> None:
+        result = getattr(self.results_page, "result", None)
+        opener = getattr(self.services, "open_path", None)
+        path = result.output_dir / name if result and result.output_dir else None
+        if path is not None and path.is_file() and callable(opener):
+            opener(path)
+
+    def _open_combined_output(self) -> None:
+        result = getattr(self.results_page, "result", None)
+        outputs = self.project_state.outputs
+        opener = getattr(self.services, "open_path", None)
+        if result and result.output_dir and outputs and callable(opener):
+            path = result.output_dir / f"{outputs.batch_name}.pdf"
+            if path.is_file():
+                opener(path)
+
+    def closeEvent(self, event) -> None:
+        if self._thread is not None:
+            self._close_when_idle = True
+            self._request_cancel()
+            event.ignore()
+            return
+        preview_service = getattr(self.services, "preview_service", None)
+        if preview_service is not None:
+            preview_service.clear()
+        event.accept()
 
     def _go_back(self) -> None:
         index = STEP_IDS.index(self.current_step)
