@@ -11,13 +11,13 @@ import shutil
 import sys
 import tempfile
 
-from PySide6.QtCore import QSettings, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from certificate_automation.batch import BatchGenerator
 from certificate_automation.filenames import safe_stem
 from certificate_automation.i18n import CatalogSet, package_root, validate_catalogs
+from certificate_automation.local_open import open_local_path
 from certificate_automation.importers.clipboard import (
     create_manual_dataset,
     import_clipboard,
@@ -169,9 +169,7 @@ def create_default_services(locale: str = "en") -> ApplicationServices:
         validate=validate_preflight,
         preview=preview_generator.generate,
         batch_generator=BatchGenerator(converter),
-        open_path=lambda path: QDesktopServices.openUrl(
-            QUrl.fromLocalFile(str(Path(path).resolve()))
-        ),
+        open_path=open_local_path,
         confirm_generation=lambda parent: QMessageBox.question(
             parent,
             "Generate official certificates?",

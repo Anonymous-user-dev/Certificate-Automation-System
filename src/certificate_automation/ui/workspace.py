@@ -1097,6 +1097,7 @@ class WorkspaceWindow(QMainWindow):
         if self._read_only:
             return
         self.project_state = replace(self.project_state, outputs=outputs)
+        self.results_page.set_expected_combined(outputs.combined_pdf)
         self.results_page.generate_button.setEnabled(True)
         self.state = replace(self.state, project_revision=self.state.project_revision + 1)
         self._mark_project_dirty()
@@ -1209,6 +1210,10 @@ class WorkspaceWindow(QMainWindow):
         thread.start()
 
     def _generation_finished(self, result) -> None:
+        outputs = self.project_state.outputs
+        self.results_page.set_expected_combined(
+            bool(outputs and outputs.combined_pdf)
+        )
         self.results_page.set_published(result)
 
     def _generation_failed(self, error) -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QLabel, QProgressBar, QPushButton, QVBoxLayout, QWidget
 
 from certificate_automation.i18n import CatalogSet
@@ -20,10 +20,15 @@ class ResultsPage(QWidget):
         super().__init__(parent)
         self._catalogs = catalogs
         self.state = "ready"
+        self._expected_combined = False
         self.title = QLabel()
         self.title.setProperty("role", "title")
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
+        self.status_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
         self.progress = QProgressBar()
         self.generate_button = QPushButton()
         self.generate_button.setProperty("role", "primary")
@@ -68,6 +73,9 @@ class ResultsPage(QWidget):
         self._enable_results(False)
         self.status_label.setText(self._catalogs.text("generation.running"))
 
+    def set_expected_combined(self, selected: bool) -> None:
+        self._expected_combined = bool(selected)
+
     def update_progress(self, event) -> None:
         self.progress.setMaximum(max(int(event.total), 1))
         self.progress.setValue(int(event.current))
@@ -89,7 +97,7 @@ class ResultsPage(QWidget):
         self.open_manifest_button.setEnabled(
             bool(output_dir and (output_dir / "manifest.json").is_file())
         )
-        self.status_label.setText(self._catalogs.text("generation.published"))
+        self._show_published_status()
 
     def set_failed(self, error) -> None:
         self.state = "failed"
@@ -115,6 +123,22 @@ class ResultsPage(QWidget):
         for control, key in controls:
             control.setText(self._catalogs.text(key))
             control.setAccessibleName(control.text())
+        if self.state == "published":
+            self._show_published_status()
+
+    def _show_published_status(self) -> None:
+        result = self.result
+        path = result.combined_pdf_path
+        if path is not None and path.is_file():
+            detail = self._catalogs.text("results.combined_ready", path=str(path))
+        elif self._expected_combined:
+            self.status_label.setText(self._catalogs.text("results.combined_missing"))
+            return
+        else:
+            detail = self._catalogs.text("results.combined_not_selected")
+        self.status_label.setText(
+            self._catalogs.text("generation.published") + "\n" + detail
+        )
 
     def _enable_results(self, enabled: bool) -> None:
         for control in (

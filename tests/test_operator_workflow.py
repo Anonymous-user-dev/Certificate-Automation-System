@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QMessageBox
+from docx import Document
 import pytest
+from pypdf import PdfReader, PdfWriter
 
+from certificate_automation.batch import BatchGenerator
 from certificate_automation.batch import BatchResult
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
 from certificate_automation.domain import BatchState, Issue, Severity
@@ -106,6 +110,67 @@ def test_operator_can_complete_manual_combined_pdf_workflow(
     qtbot.waitUntil(lambda: window._thread is None)
     assert services.generator.requests[-1].outputs.combined_pdf is True
     assert services.generator.requests[-1].outputs.row_ids == ("row-1", "row-2")
+
+
+def test_operator_combined_only_creates_ordered_pdf_and_opens_published_file(
+    qtbot, tmp_path, docx_factory
+):
+    class Converter:
+        def is_available(self):
+            return WordAvailability(True, "available")
+
+        def convert(self, docx_path, pdf_path, on_attempt=None):
+            certificate_text = "\n".join(p.text for p in Document(docx_path).paragraphs)
+            assert "Chen Wei" in certificate_text or "Li Ming" in certificate_text
+            width = 613 if "Chen Wei" in certificate_text else 614
+            writer = PdfWriter()
+            writer.add_blank_page(width=width, height=792)
+            with pdf_path.open("wb") as output:
+                writer.write(output)
+
+    template_path = docx_factory(paragraph_runs=[["{{FULL_NAME}}"], ["{{AWARD}}"]])
+    services = _services(tmp_path, template_path)
+    services.batch_generator = BatchGenerator(
+        Converter(), batch_id_factory=lambda: "20260922-120000-abcd1234"
+    )
+    opened = []
+    services.open_path = lambda path: opened.append(Path(path)) or True
+    window = WorkspaceWindow(services)
+    qtbot.addWidget(window)
+    window.show()
+    window.new_project()
+    window.data_page.set_dataset(_dataset())
+    qtbot.mouseClick(window.data_page.continue_button, Qt.MouseButton.LeftButton)
+    window.template_page.set_inspection(inspect_template(template_path))
+    qtbot.mouseClick(window.template_page.continue_button, Qt.MouseButton.LeftButton)
+    window.match_page.cards["FULL_NAME"].set_column("Name")
+    window.match_page.cards["AWARD"].set_column("Award")
+    qtbot.mouseClick(window.match_page.continue_button, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(window.review_page.continue_button, Qt.MouseButton.LeftButton)
+    destination = tmp_path / "batches"
+    destination.mkdir()
+    window.output_page.docx.setChecked(False)
+    window.output_page.individual_pdf.setChecked(False)
+    window.output_page.combined_pdf.setChecked(True)
+    window.output_page.set_order(("row-2", "row-1"))
+    window.output_page.destination.setText(str(destination))
+    window.output_page.batch_name.setText("Awards")
+    qtbot.mouseClick(window.output_page.continue_button, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(window.results_page.generate_button, Qt.MouseButton.LeftButton)
+
+    qtbot.waitUntil(lambda: window.results_page.state == "published", timeout=10000)
+    qtbot.waitUntil(lambda: window._thread is None)
+    result = window.results_page.result
+    assert result.combined_pdf_path == result.output_dir / "Awards.pdf"
+    assert [p.name for p in result.output_dir.glob("*.pdf")] == ["Awards.pdf"]
+    assert not list(result.output_dir.glob("*.docx"))
+    assert [float(page.mediabox.width) for page in PdfReader(result.combined_pdf_path).pages] == [613, 614]
+    manifest = json.loads((result.output_dir / "manifest.json").read_text("utf-8"))
+    assert manifest["ordered_row_ids"] == ["row-2", "row-1"]
+    assert "Awards.pdf" in window.results_page.status_label.text()
+    assert str(result.combined_pdf_path) in window.results_page.status_label.text()
+    qtbot.mouseClick(window.results_page.open_combined_button, Qt.MouseButton.LeftButton)
+    assert opened == [result.combined_pdf_path]
 
 
 def test_issue_action_focuses_exact_table_cell(qtbot, tmp_path, docx_factory):

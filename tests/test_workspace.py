@@ -14,6 +14,7 @@ import pytest
 from certificate_automation.i18n import CatalogSet, package_root
 from certificate_automation.dataset import Column, DataRow, TabularDataset
 from certificate_automation.domain import BatchResult, BatchState
+from certificate_automation.output_options import OutputOptions
 from certificate_automation.ui.workspace import WorkspaceWindow
 from certificate_automation.ui.workspace import SaveState
 from certificate_automation.project import ProjectCorruptError, ProjectSaveError, ProjectState, ProjectStore
@@ -665,3 +666,53 @@ def test_results_enable_combined_action_only_for_exact_combined_artifact(
         )
     )
     assert workspace.results_page.open_combined_button.isEnabled()
+
+
+def test_results_explain_when_combined_was_not_selected_or_not_created(workspace, tmp_path):
+    output = tmp_path / "published"
+    output.mkdir()
+    result = BatchResult(BatchState.PUBLISHED, output, 1)
+
+    workspace.results_page.set_expected_combined(False)
+    workspace.results_page.set_published(result)
+    assert "not selected" in workspace.results_page.status_label.text().lower()
+
+    workspace.results_page.set_expected_combined(True)
+    workspace.results_page.set_published(result)
+    assert "not created" in workspace.results_page.status_label.text().lower()
+    assert "complete verified batch" not in workspace.results_page.status_label.text().lower()
+    assert not workspace.results_page.open_combined_button.isEnabled()
+
+
+def test_combined_open_failure_is_visible_and_other_result_actions_remain_available(
+    workspace, qtbot, tmp_path
+):
+    output = tmp_path / "published"
+    output.mkdir()
+    combined = output / "Awards.pdf"
+    combined.write_bytes(b"pdf")
+    workspace.services.open_path = lambda _path: False
+    workspace.results_page.set_expected_combined(True)
+    workspace.results_page.set_published(
+        BatchResult(BatchState.PUBLISHED, output, 2, combined_pdf_path=combined)
+    )
+
+    qtbot.mouseClick(workspace.results_page.open_combined_button, Qt.MouseButton.LeftButton)
+
+    assert workspace.results_page.status_label.text() == workspace.catalogs.text(
+        "results.open_combined_failed"
+    )
+    assert workspace.results_page.open_output_button.isEnabled()
+
+
+def test_resumed_project_result_uses_saved_combined_choice(workspace, tmp_path):
+    output = tmp_path / "published"
+    output.mkdir()
+    workspace.project_state = replace(
+        workspace.project_state,
+        outputs=OutputOptions(False, False, True, tmp_path, "Awards", ("row-1",)),
+    )
+
+    workspace._generation_finished(BatchResult(BatchState.PUBLISHED, output, 1))
+
+    assert "not created" in workspace.results_page.status_label.text().lower()

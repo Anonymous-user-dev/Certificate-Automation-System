@@ -18,6 +18,7 @@ class TemplatePage(QWidget):
     def __init__(self, catalogs: CatalogSet, parent=None) -> None:
         super().__init__(parent)
         self._catalogs = catalogs
+        self.setAcceptDrops(True)
         self.inspection: TemplateInspection | None = None
         self.title = QLabel()
         self.title.setProperty("role", "title")
@@ -25,6 +26,13 @@ class TemplatePage(QWidget):
         self.explanation.setWordWrap(True)
         self.field_guide = QLabel()
         self.field_guide.setWordWrap(True)
+        self.drop_hint = QLabel()
+        self.drop_hint.setWordWrap(True)
+        self.drop_hint.setMinimumHeight(72)
+        self.drop_hint.setProperty("role", "drop_target")
+        self.drop_hint.setStyleSheet(
+            "border: 2px dashed #8497b5; border-radius: 8px; padding: 16px;"
+        )
         self.choose_button = QPushButton()
         self.file_name = QLabel("—")
         self.hash_label = QLabel("—")
@@ -40,6 +48,7 @@ class TemplatePage(QWidget):
             self.title,
             self.explanation,
             self.field_guide,
+            self.drop_hint,
             self.choose_button,
             self.file_name,
             self.hash_label,
@@ -84,6 +93,8 @@ class TemplatePage(QWidget):
         self.title.setText(self._catalogs.text("template.title"))
         self.explanation.setText(self._catalogs.text("template.explanation"))
         self.field_guide.setText(self._catalogs.text("template.field_guide"))
+        self.drop_hint.setText(self._catalogs.text("template.drop_hint"))
+        self.drop_hint.setAccessibleName(self.drop_hint.text())
         self.choose_button.setText(self._catalogs.text("template.choose"))
         self.choose_button.setAccessibleName(self.choose_button.text())
         self.placeholder_list.setAccessibleName(self._catalogs.text("template.placeholders"))
@@ -99,3 +110,40 @@ class TemplatePage(QWidget):
         )
         if selected:
             self.template_selected.emit(Path(selected))
+
+    def _drop_candidate(self, mime_data) -> tuple[Path | None, str | None]:
+        if not mime_data.hasUrls() or len(mime_data.urls()) != 1:
+            return None, "template.drop_one"
+        url = mime_data.urls()[0]
+        if not url.isLocalFile():
+            return None, "template.drop_local"
+        path = Path(url.toLocalFile())
+        if path.is_dir():
+            return None, "template.drop_file"
+        if path.suffix.casefold() != ".docx":
+            return None, "template.unsupported_type"
+        if not path.is_file():
+            return None, "template.drop_file"
+        return path, None
+
+    def dragEnterEvent(self, event) -> None:
+        path, error = self._drop_candidate(event.mimeData())
+        if path is not None:
+            self.error_label.clear()
+            event.acceptProposedAction()
+        else:
+            self.error_label.setText(self._catalogs.text(error))
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:
+        path, error = self._drop_candidate(event.mimeData())
+        if path is None:
+            self.error_label.setText(self._catalogs.text(error))
+            event.ignore()
+            return
+        self.error_label.clear()
+        self.template_selected.emit(path)
+        event.acceptProposedAction()
