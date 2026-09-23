@@ -46,6 +46,7 @@
   "generation.phase.verify": "Verifying generated documents",
   "generation.published": "The complete verified batch was published.",
   "generation.running": "Generating and verifying the official batch…",
+  "generation.project_switch_blocked": "This batch is still being generated. Wait for it to finish or cancel it before changing projects.",
   "home.continue_draft": "Continue a saved draft",
   "home.new_batch": "New certificate batch",
   "home.open_results": "Open previous results",

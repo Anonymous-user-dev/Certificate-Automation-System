@@ -46,6 +46,7 @@
   "generation.phase.verify": "正在验证生成的文档",
   "generation.published": "完整且已验证的批次已发布。",
   "generation.running": "正在生成并验证正式批次…",
+  "generation.project_switch_blocked": "此批次仍在生成。请等待完成或取消生成后再切换项目。",
   "home.continue_draft": "继续已保存的草稿",
   "home.new_batch": "新建证书批次",
   "home.open_results": "打开以前的结果",

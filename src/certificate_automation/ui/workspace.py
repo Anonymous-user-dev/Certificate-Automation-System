@@ -37,7 +37,7 @@ from certificate_automation.batch import BatchRequest, CancellationToken
 from certificate_automation.i18n import CatalogError, CatalogSet, SUPPORTED_LOCALES, package_root
 from certificate_automation.mapping import MappingPlan, evaluate_plan
 from certificate_automation.output_options import OutputOptions
-from certificate_automation.project import ProjectCoordinator, ProjectSaveError, ProjectState, ProjectStore
+from certificate_automation.project import ProjectCoordinator, ProjectError, ProjectSaveError, ProjectState, ProjectStore
 from certificate_automation.project_catalog import ProjectCatalog
 from certificate_automation.project_migration import ProjectMigrationService
 from certificate_automation.template import inspect_template
@@ -469,8 +469,6 @@ class WorkspaceWindow(QMainWindow):
         self.review_page.clear_context()
         self.output_page.reset_options()
         self.results_page.set_ready()
-        self.results_page.progress.setValue(0)
-        self.results_page.status_label.clear()
         self.results_page.generate_button.setEnabled(False)
 
     def _restore_project_state(
@@ -558,8 +556,17 @@ class WorkspaceWindow(QMainWindow):
         self.load_project(path)
 
     def _flush_before_switch(self) -> None:
+        if self._block_project_switch_while_generating():
+            raise ProjectError("generation.project_switch_blocked")
         if self.coordinator is not None and not self.coordinator.flush():
             raise ProjectSaveError("project.save_failed")
+
+    def _block_project_switch_while_generating(self) -> bool:
+        if self._thread is None:
+            return False
+        code = "generation.project_switch_blocked"
+        self.banner.show_issue(code, self.catalogs.text(code))
+        return True
 
     def _attach_store(self, store: ProjectStore) -> None:
         if store.read_only:
@@ -773,6 +780,8 @@ class WorkspaceWindow(QMainWindow):
             self.step_rail.set_compact(event.size().width() < 760)
 
     def _show_home(self) -> None:
+        if self._block_project_switch_while_generating():
+            return
         self.home.set_current_project_available(self.state.project_path is not None)
         self.root_stack.setCurrentWidget(self.home)
 
@@ -1231,20 +1240,20 @@ class WorkspaceWindow(QMainWindow):
             self.cancellation.request()
 
     def _open_published_output(self) -> None:
-        result = getattr(self.results_page, "result", None)
+        result = self.results_page.result if self.results_page.state == "published" else None
         opener = getattr(self.services, "open_path", None)
         if result and result.output_dir and callable(opener):
             opener(result.output_dir)
 
     def _open_result_file(self, name: str) -> None:
-        result = getattr(self.results_page, "result", None)
+        result = self.results_page.result if self.results_page.state == "published" else None
         opener = getattr(self.services, "open_path", None)
         path = result.output_dir / name if result and result.output_dir else None
         if path is not None and path.is_file() and callable(opener):
             opener(path)
 
     def _open_combined_output(self) -> None:
-        result = getattr(self.results_page, "result", None)
+        result = self.results_page.result if self.results_page.state == "published" else None
         opener = getattr(self.services, "open_path", None)
         path = result.combined_pdf_path if result else None
         if not (result and result.output_dir and path and callable(opener)):
@@ -1317,6 +1326,8 @@ class WorkspaceWindow(QMainWindow):
         self.settings.setValue("recent_projects", recent)
 
     def _continue_draft(self) -> None:
+        if self._block_project_switch_while_generating():
+            return
         recent = self.settings.value("recent_projects", [])
         if isinstance(recent, str):
             recent = [recent]
@@ -1334,6 +1345,8 @@ class WorkspaceWindow(QMainWindow):
             self._open_recent_project(Path(selected))
 
     def _recover_draft(self) -> None:
+        if self._block_project_switch_while_generating():
+            return
         selected, _filter = QFileDialog.getOpenFileName(
             self,
             self.catalogs.text("home.recover_project"),
@@ -1347,6 +1360,8 @@ class WorkspaceWindow(QMainWindow):
         self.home.set_projects(self.project_catalog.list())
 
     def _create_project_from_home(self) -> None:
+        if self._block_project_switch_while_generating():
+            return
         selected, _filter = QFileDialog.getSaveFileName(
             self, self.catalogs.text("home.new_project"), "",
             self.catalogs.text("file.project_filter"),
@@ -1362,6 +1377,8 @@ class WorkspaceWindow(QMainWindow):
             self._show_project_error(error)
 
     def _open_project_dialog(self) -> None:
+        if self._block_project_switch_while_generating():
+            return
         selected, _filter = QFileDialog.getOpenFileName(
             self, self.catalogs.text("home.choose_project"), "",
             self.catalogs.text("file.project_filter"),
@@ -1370,12 +1387,16 @@ class WorkspaceWindow(QMainWindow):
             self._open_recent_project(Path(selected))
 
     def _open_recent_project(self, path: Path) -> None:
+        if self._block_project_switch_while_generating():
+            return
         try:
             self.load_project(path)
         except Exception as error:
             self._show_project_error(error)
 
     def _repair_recent_project(self, missing_path: Path) -> None:
+        if self._block_project_switch_while_generating():
+            return
         selected, _filter = QFileDialog.getOpenFileName(
             self, self.catalogs.text("home.repair"), "",
             self.catalogs.text("file.project_filter"),
@@ -1390,6 +1411,8 @@ class WorkspaceWindow(QMainWindow):
             self._refresh_recent_projects()
 
     def _try_example(self) -> None:
+        if self._block_project_switch_while_generating():
+            return
         selected = QFileDialog.getExistingDirectory(
             self, self.catalogs.text("example.choose_destination")
         )
@@ -1419,6 +1442,8 @@ class WorkspaceWindow(QMainWindow):
         QMessageBox.warning(self, self.catalogs.text("app.title"), message)
 
     def _open_results(self) -> None:
+        if self._block_project_switch_while_generating():
+            return
         selected = QFileDialog.getExistingDirectory(
             self,
             self.catalogs.text("home.open_results"),

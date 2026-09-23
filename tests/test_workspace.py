@@ -6,6 +6,7 @@ from dataclasses import replace
 from hashlib import sha256
 import json
 import sqlite3
+from threading import Event
 
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QAbstractButton, QAbstractItemView, QComboBox, QLineEdit, QTableView
@@ -17,7 +18,8 @@ from certificate_automation.domain import BatchResult, BatchState
 from certificate_automation.output_options import OutputOptions
 from certificate_automation.ui.workspace import WorkspaceWindow
 from certificate_automation.ui.workspace import SaveState
-from certificate_automation.project import ProjectCorruptError, ProjectSaveError, ProjectState, ProjectStore
+from certificate_automation.project import ProjectCorruptError, ProjectError, ProjectSaveError, ProjectState, ProjectStore
+from certificate_automation.validation import ValidationReport
 from certificate_automation.word import WordAvailability
 from certificate_automation.template import inspect_template
 from fixtures import docx_factory
@@ -666,6 +668,111 @@ def test_results_enable_combined_action_only_for_exact_combined_artifact(
         )
     )
     assert workspace.results_page.open_combined_button.isEnabled()
+
+
+@pytest.mark.parametrize("switch", ("new", "open"))
+def test_project_switch_clears_prior_published_result_and_open_actions(
+    workspace, tmp_path, switch
+):
+    first = tmp_path / "Published.certproject"
+    second = tmp_path / "Empty.certproject"
+    workspace.new_project(first)
+    if switch == "open":
+        ProjectStore.create(second).save(ProjectState(0, workspace.project_state.dataset))
+    output = tmp_path / "published"
+    output.mkdir()
+    combined = output / "Awards.pdf"
+    combined.write_bytes(b"pdf")
+    (output / "batch_summary.html").write_text("summary", encoding="utf-8")
+    opened = []
+    workspace.services.open_path = lambda path: opened.append(path) or True
+    workspace.results_page.set_failed(RuntimeError("previous error"))
+    workspace.results_page.set_expected_combined(True)
+    workspace.results_page.set_published(
+        BatchResult(BatchState.PUBLISHED, output, 1, combined_pdf_path=combined)
+    )
+
+    if switch == "new":
+        workspace.new_project(second)
+    else:
+        workspace.load_project(second)
+
+    assert workspace.results_page.state == "ready"
+    assert workspace.results_page.result is None
+    assert workspace.results_page.error is None
+    assert workspace.results_page._expected_combined is False
+    assert workspace.results_page.status_label.text() == ""
+    assert not workspace.results_page.open_combined_button.isEnabled()
+    workspace._open_published_output()
+    workspace._open_combined_output()
+    workspace._open_result_file("batch_summary.html")
+    assert opened == []
+
+
+def test_active_generation_blocks_all_project_switch_routes_and_finishes_in_origin(
+    workspace, qtbot, tmp_path, docx_factory, monkeypatch
+):
+    first = tmp_path / "Generating.certproject"
+    second = tmp_path / "Another.certproject"
+    template = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
+    _saved_with_downstream_state(workspace, first, template, tmp_path)
+    ProjectStore.create(second).save(ProjectState(0, workspace.project_state.dataset))
+    started = Event()
+    release = Event()
+    output = tmp_path / "generated-by-first"
+    output.mkdir()
+
+    class WaitingGenerator:
+        def generate(self, request, progress=None, cancellation=None):
+            started.set()
+            if not release.wait(5):
+                raise RuntimeError("test generator timed out")
+            return BatchResult(BatchState.PUBLISHED, output, 1)
+
+    workspace.services.validate = lambda dataset, template, plan, options: ValidationReport(
+        (), {}, 0, dataset.revision, template.sha256
+    )
+    workspace.services.batch_generator = WaitingGenerator()
+    workspace.start_generation()
+    qtbot.waitUntil(started.is_set, timeout=3000)
+    monkeypatch.setattr(
+        "certificate_automation.ui.workspace.QFileDialog.getOpenFileName",
+        lambda *_args: pytest.fail("project dialog opened during generation"),
+    )
+    monkeypatch.setattr(
+        "certificate_automation.ui.workspace.QFileDialog.getSaveFileName",
+        lambda *_args: pytest.fail("project dialog opened during generation"),
+    )
+    monkeypatch.setattr(
+        "certificate_automation.ui.workspace.QFileDialog.getExistingDirectory",
+        lambda *_args: pytest.fail("project dialog opened during generation"),
+    )
+    try:
+        with pytest.raises(ProjectError, match="generation.project_switch_blocked"):
+            workspace.new_project(tmp_path / "Unwanted.certproject")
+        with pytest.raises(ProjectError, match="generation.project_switch_blocked"):
+            workspace.load_project(second)
+        workspace._show_home()
+        for action in (
+            workspace._create_project_from_home,
+            workspace._open_project_dialog,
+            lambda: workspace._open_recent_project(second),
+            lambda: workspace._repair_recent_project(second),
+            workspace._try_example,
+            workspace._recover_draft,
+        ):
+            action()
+        assert workspace.root_stack.currentWidget() is workspace.workspace_surface
+        assert workspace.state.project_path == first
+        assert workspace.banner.issue_code == "generation.project_switch_blocked"
+        assert not (tmp_path / "Unwanted.certproject").exists()
+    finally:
+        release.set()
+        qtbot.waitUntil(lambda: workspace._thread is None, timeout=5000)
+
+    assert workspace.state.project_path == first
+    assert workspace.results_page.result.output_dir == output
+    assert workspace.results_page.state == "published"
 
 
 def test_results_explain_when_combined_was_not_selected_or_not_created(workspace, tmp_path):

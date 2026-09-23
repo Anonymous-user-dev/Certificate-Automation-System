@@ -62,12 +62,20 @@ class ResultsPage(QWidget):
 
     def set_ready(self) -> None:
         self.state = "ready"
+        self.result = None
+        self.error = None
+        self._expected_combined = False
+        self.status_label.clear()
+        self.progress.setValue(0)
         self.generate_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self._enable_results(False)
 
     def set_running(self) -> None:
         self.state = "running"
+        self.result = None
+        self.error = None
+        self._expected_combined = False
         self.generate_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self._enable_results(False)
@@ -84,6 +92,7 @@ class ResultsPage(QWidget):
     def set_published(self, result) -> None:
         self.state = "published"
         self.result = result
+        self.error = None
         self.generate_button.setEnabled(False)
         self.cancel_button.setEnabled(False)
         output_dir = result.output_dir
@@ -102,6 +111,8 @@ class ResultsPage(QWidget):
     def set_failed(self, error) -> None:
         self.state = "failed"
         self.error = error
+        self.result = None
+        self._expected_combined = False
         self.generate_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self._enable_results(False)
