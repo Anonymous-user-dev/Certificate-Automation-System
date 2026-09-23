@@ -1,11 +1,12 @@
 # Certificate Automation
 
-Certificate Automation 2.0 is a fully offline Windows desktop application for generating official certificate batches from Excel, CSV, TSV, pasted, or manually entered tables and a Word template. Operators choose DOCX, individual PDF, and an optional combined print PDF. Nothing is published unless the complete selected batch verifies successfully.
+Certificate Automation 2.1 is a fully offline Windows desktop application for generating official certificate batches from Excel, CSV, TSV, pasted, or manually entered tables and a Word template. It selects editable DOCX plus individual PDFs by default and can optionally create one combined print PDF. Nothing is published unless the complete selected batch verifies successfully.
 
 ## Product guarantees
 
 - Guided PySide6 interface for nontechnical staff.
-- Flexible `{{PLACEHOLDER}}` fields matched to columns, fixed values, sequences, source rows, formatted dates, or joined columns.
+- Any field written as `{{PLACEHOLDER}}` in the Word template is detected automatically and can be matched without changing program code.
+- Flexible fields matched to renamed or imported columns, fixed values, sequences, source rows, formatted dates, or joined columns.
 - English, Simplified Chinese, and Russian interface translations.
 - Complete preflight validation before official generation.
 - Formatting-safe replacement across Word paragraphs, split runs, tables, headers, footers, and text boxes.
@@ -25,9 +26,9 @@ Microsoft Word is required for PDF output. The manifest records hashes and proce
 | Excel `.xlsx` | Explicit worksheet selection; hidden rows/columns require an operator choice; merged data cells and missing formula caches are rejected |
 | CSV / TSV / text | UTF-8, UTF-8 BOM, UTF-16 BOM, Windows-1251, and GB18030; ambiguous encoding or separator requires confirmation |
 | Clipboard | Tab-separated tables or CSV with an import preview |
-| Manual | Spreadsheet-style rows and columns with undo/redo |
+| Manual | Spreadsheet-style rows and columns with add, remove, rename, edit, and undo/redo controls |
 
-Source files are copied into an internal snapshot and are never edited. Draft projects and previews may contain personal data: store drafts in an approved location and delete them according to institutional retention policy. Temporary previews are replaced when the data revision changes and removed on normal shutdown.
+Source files are copied into an internal snapshot and are never edited. Draft projects and previews may contain personal data: store drafts in an approved location and delete them according to institutional retention policy. Temporary previews use an isolated application-session folder and are removed on normal shutdown when Windows has released them.
 
 ## Development setup
 

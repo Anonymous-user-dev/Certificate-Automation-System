@@ -1,5 +1,5 @@
 #define AppName "Certificate Automation"
-#define AppVersion "2.0.1"
+#define AppVersion "2.1.0"
 #define AppPublisher "Certificate Automation"
 #define AppExeName "CertificateAutomation.exe"
 #ifndef BuildRoot

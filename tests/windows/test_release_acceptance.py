@@ -98,6 +98,7 @@ def test_real_word_publishes_verified_50_recipient_mixed_script_batch(tmp_path):
     docx_files = tuple(output.glob("*.docx"))
     pdf_files = tuple(path for path in output.glob("*.pdf") if path.name != "All Certificates.pdf")
     combined = output / "All Certificates.pdf"
+    assert result.combined_pdf_path == combined
     assert len(docx_files) == 50
     assert len(pdf_files) == 50
     assert len(PdfReader(combined).pages) == sum(len(PdfReader(path).pages) for path in pdf_files)

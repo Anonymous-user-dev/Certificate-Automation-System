@@ -38,6 +38,22 @@ def test_packaged_application_imports_qt_and_constructs_workspace(request):
     assert result.returncode == 0
 
 
+def test_packaged_application_exposes_custom_fields_and_safe_pdf_defaults(request):
+    executable_value = request.config.getoption("--exe")
+    if not executable_value:
+        pytest.skip("pass --exe to test a packaged application")
+    executable = Path(executable_value)
+    assert executable.is_file(), f"Packaged executable was not found: {executable}"
+
+    result = subprocess.run(
+        [str(executable), "--workflow-smoke-test"],
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0
+
+
 def test_packaged_application_contains_all_locale_catalogs(request):
     executable_value = request.config.getoption("--exe")
     if not executable_value:

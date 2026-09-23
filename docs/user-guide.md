@@ -26,8 +26,8 @@ Choose one source on **Recipient Data / 收件人数据 / Данные полу�
 
 - **Excel**: select `.xlsx`, then choose the worksheet. If hidden rows or columns exist, the program asks whether they belong in this batch. Merged data cells and formulas without cached values are rejected rather than guessed.
 - **CSV / TSV**: supported encodings are UTF-8, UTF-8 with BOM, UTF-16 with BOM, Windows-1251, and GB18030. The preview shows the encoding and separator. If detection is ambiguous, you must choose explicitly.
-- **Paste table**: copy a tab-separated table from a spreadsheet or CSV text. Review the parse before replacing the current table.
-- **Manual table**: add, remove, search, sort, and edit rows and columns inside the application. Undo and redo are available.
+- **Paste a table**: in Excel or another table, select the column-heading row and all recipient rows, choose **Copy**, then choose **Paste a table** in this application. Review the preview before replacing the current table.
+- **Create a table**: add, remove, search, sort, and edit rows and columns inside the application. Select a cell in a column and choose **Rename column** to give that column the exact meaning you need. Undo and redo include column renames.
 
 Importing never silently changes an existing table: confirm the preview first. A rejected or cancelled import leaves current edits unchanged.
 
@@ -44,15 +44,17 @@ Place fields inside double braces:
 
 Field names may contain letters, numbers, spaces, hyphens, and underscores. The application treats spaces, hyphens, underscores, and letter case as equivalent when suggesting Excel matches. For example, `{{FULL_NAME}}` automatically matches an Excel column named `Full Name`.
 
+You do not need the program to know a field in advance. If a different approved template contains `{{EMPLOYEE_ID}}`, `{{COURSE_HOURS}}`, or another name, the application detects it and creates a matching card in Step 3 automatically. Add or rename a recipient-data column in Step 1, or choose a fixed value or another supported source in Step 3.
+
 Fields are supported in normal paragraphs, tables, headers, footers, and Word text boxes. Do not split one placeholder across separate paragraphs. Keep the braces and field name together as one visible field, even if Word internally divides its formatting runs.
 
 ## The six-step workflow
 
 1. **Recipient Data / 收件人数据 / Данные получателей** — import, paste, or type the table; inspect every row.
 2. **Word Template / Word 模板 / Шаблон Word** — choose a `.docx`; review its SHA-256 hash and detected placeholders. Macro-enabled, protected, malformed, or ambiguous templates are rejected.
-3. **Match Fields / 匹配字段 / Сопоставление полей** — map every placeholder to a column, fixed value, number sequence, original row, formatted date, or joined columns. Continue is blocked while anything is unresolved.
+3. **Match Fields / 匹配字段 / Сопоставление полей** — for each detected `{{FIELD_NAME}}`, choose a data column, fixed value, number sequence, original row, formatted date, or joined columns. Only settings needed for the selected choice are shown. Continue is blocked while anything is unresolved.
 4. **Review / 审核 / Проверка** — switch between recipients, inspect resolved values and issues, and optionally generate a temporary in-app PDF preview. Warnings must be consciously reviewed.
-5. **Output Options / 输出选项 / Параметры вывода** — choose DOCX, individual PDF, and/or combined PDF; select the destination and order. PDF controls are disabled with an explanation if Word is unavailable.
+5. **Output Options / 输出选项 / Параметры вывода** — DOCX and one PDF per recipient are selected by default. Optionally select one combined PDF for bulk printing, then choose the destination and order. The page states the exact number of files planned. PDF controls are disabled with an explanation if Word is unavailable.
 6. **Generate / 生成 / Создание** — start the verified batch, monitor progress, or request cancellation. Result links appear only after atomic publication.
 
 ## Output batch contents
@@ -71,6 +73,12 @@ Depending on the selected formats, it contains:
 - `batch_summary.html`, which staff can open offline;
 - `manifest.json`, containing source/output hashes, mappings, counts, timestamps, and source row numbers;
 - `support.log`, containing operational facts without recipient values or output filenames.
+
+The HTML summary, manifest, and support log are safety and audit records; they are not certificates. If you need print-ready certificates, keep **Individual PDF documents** selected. If you want one file to send to a printer, also select **One combined PDF for printing**. After generation, **Open combined PDF** is enabled only when that exact verified file exists.
+
+### Date fields in simple terms
+
+Choose **Formatted date** only when a recipient-data column contains dates that should be printed differently. **Date as written in your table** describes the source, such as `%Y-%m-%d` for `2026-09-22`. **Date as printed on the certificate** describes the result, such as `%d %B %Y` for `22 September 2026`. The common settings are already filled in; change them only when your table uses another unambiguous order.
 
 The SHA-256 hashes help detect accidental file changes. They do not replace an institutional digital-signature or document-approval process.
 
