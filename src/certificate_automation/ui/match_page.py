@@ -22,6 +22,7 @@ from certificate_automation.mapping import (
     FormattedDateValue,
     JoinValue,
     MappingPlan,
+    MappingPlanError,
     SequenceValue,
     SourceRowValue,
 )
@@ -132,6 +133,33 @@ class MappingCard(QWidget):
                 self.type_combo.setCurrentIndex(self.type_combo.findData("column"))
                 return
 
+    def set_mapping_source(self, source) -> None:
+        if isinstance(source, ColumnValue):
+            if self.column_combo.findData(source.column_id) < 0:
+                raise MappingPlanError("mapping.unknown_column")
+            self.set_column(source.column_id)
+        elif isinstance(source, FixedValue):
+            self.fixed_input.setText(source.value)
+            self.type_combo.setCurrentIndex(self.type_combo.findData("fixed"))
+        elif isinstance(source, SequenceValue) and source == SequenceValue():
+            self.type_combo.setCurrentIndex(self.type_combo.findData("sequence"))
+        elif isinstance(source, SourceRowValue):
+            self.type_combo.setCurrentIndex(self.type_combo.findData("source_row"))
+        elif isinstance(source, FormattedDateValue):
+            if self.column_combo.findData(source.source.column_id) < 0:
+                raise MappingPlanError("mapping.unknown_column")
+            self.column_combo.setCurrentIndex(self.column_combo.findData(source.source.column_id))
+            self.input_format.setText(source.input_format)
+            self.output_format.setText(source.output_format)
+            self.type_combo.setCurrentIndex(self.type_combo.findData("formatted_date"))
+        elif isinstance(source, JoinValue) and (
+            source.column_ids == tuple(column.column_id for column in self.dataset.columns)
+            and source.separator == " "
+        ):
+            self.type_combo.setCurrentIndex(self.type_combo.findData("join"))
+        else:
+            raise MappingPlanError("mapping.invalid_json")
+
     def mapping_source(self):
         kind = self.type_combo.currentData()
         if kind == "column":
@@ -206,6 +234,14 @@ class MatchPage(QWidget):
                 if (source := card.mapping_source()) is not None
             }
         )
+
+    def set_plan(self, plan: MappingPlan) -> None:
+        if set(plan.sources) != set(self.cards):
+            raise MappingPlanError("mapping.invalid_json")
+        for placeholder, source in plan.sources.items():
+            self.cards[placeholder].set_mapping_source(source)
+        if self.mapping_plan().to_json() != plan.to_json():
+            raise MappingPlanError("mapping.invalid_json")
 
     def focus_placeholder(self, name: str) -> None:
         card = self.cards[name]

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
+from hashlib import sha256
 import os
 from pathlib import Path
 from typing import Mapping
@@ -12,6 +13,7 @@ from typing import Mapping
 from PySide6.QtCore import QSettings, QStandardPaths, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QAbstractItemView,
     QApplication,
     QComboBox,
     QFileDialog,
@@ -33,12 +35,13 @@ from PySide6.QtWidgets import (
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
 from certificate_automation.batch import BatchRequest, CancellationToken
 from certificate_automation.i18n import CatalogError, CatalogSet, SUPPORTED_LOCALES, package_root
-from certificate_automation.mapping import MappingPlan
+from certificate_automation.mapping import MappingPlan, evaluate_plan
 from certificate_automation.output_options import OutputOptions
 from certificate_automation.project import ProjectStore
 from certificate_automation.project import ProjectCoordinator, ProjectSaveError, ProjectState
 from certificate_automation.project_catalog import ProjectCatalog
 from certificate_automation.project_migration import ProjectMigrationService
+from certificate_automation.template import inspect_template
 from certificate_automation.ui.project_home_page import ProjectHomePage
 from certificate_automation.ui.data_page import DataPage, ImportPreviewDialog
 from certificate_automation.ui.match_page import MatchPage
@@ -198,6 +201,7 @@ class WorkspaceWindow(QMainWindow):
         self.cancellation: CancellationToken | None = None
         self._close_when_idle = False
         self.coordinator: ProjectCoordinator | None = None
+        self._read_only = False
         self._loaded_project: ProjectState | None = None
         self._last_migration_backup: Path | None = None
         self.save_state = SaveState.SAVED
@@ -227,6 +231,8 @@ class WorkspaceWindow(QMainWindow):
         self.home.example_requested.connect(self._try_example)
         self.home.project_requested.connect(self._open_recent_project)
         self.home.repair_requested.connect(self._repair_recent_project)
+        self.home_button.clicked.connect(self._show_home)
+        self.retry_save_button.clicked.connect(self._retry_save)
         self.step_rail.step_requested.connect(self.navigate)
         self.back_button.clicked.connect(self._go_back)
         self.next_button.clicked.connect(self._go_next)
@@ -274,21 +280,33 @@ class WorkspaceWindow(QMainWindow):
         top_layout = QHBoxLayout(top)
         self.product_label = QLabel()
         self.product_label.setProperty("role", "title")
+        self.home_button = QPushButton()
         self.draft_label = QLabel()
         self.draft_label.setProperty("role", "muted")
         self.save_state_label = QLabel()
         self.save_state_label.setProperty("role", "muted")
+        self.retry_save_button = QPushButton()
+        self.retry_save_button.setObjectName("retryProjectSave")
+        self.retry_save_button.hide()
         self.locale_label = QLabel()
         self.locale_selector = QComboBox()
         for code, label in (("en", "English"), ("zh_CN", "简体中文"), ("ru", "Русский")):
             self.locale_selector.addItem(label, code)
         top_layout.addWidget(self.product_label)
+        top_layout.addWidget(self.home_button)
         top_layout.addWidget(self.draft_label)
         top_layout.addStretch(1)
         top_layout.addWidget(self.save_state_label)
+        top_layout.addWidget(self.retry_save_button)
         top_layout.addWidget(self.locale_label)
         top_layout.addWidget(self.locale_selector)
         outer.addWidget(top)
+
+        self.read_only_notice = QLabel()
+        self.read_only_notice.setWordWrap(True)
+        self.read_only_notice.setProperty("state", "warning")
+        self.read_only_notice.hide()
+        outer.addWidget(self.read_only_notice)
 
         self.banner = ContextBanner()
         outer.addWidget(self.banner)
@@ -357,6 +375,7 @@ class WorkspaceWindow(QMainWindow):
             store.save(project)
         self.coordinator = None
         self._loaded_project = project
+        self._read_only = False
         self._last_migration_backup = None
         self.statusBar().clearMessage()
         self.data_page.set_dataset(dataset)
@@ -367,6 +386,7 @@ class WorkspaceWindow(QMainWindow):
             self.project_catalog.remember(Path(path), project)
             self._refresh_recent_projects()
         self._set_save_state(SaveState.SAVED)
+        self._set_read_only_mode(False)
         self.banner.clear()
         self.root_stack.setCurrentWidget(self.workspace_surface)
         self._show_step("data")
@@ -381,17 +401,50 @@ class WorkspaceWindow(QMainWindow):
             store = opener(Path(path)) if callable(opener) else ProjectStore.open(Path(path))
             migration_backup = result.backup_path
         project = store.load()
+        project, restored, target_step, repair_code = self._restore_project_state(project)
         self.coordinator = None
         self._last_migration_backup = migration_backup
         self.statusBar().clearMessage()
         self._loaded_project = project
+        self._read_only = store.read_only
         self.data_page.set_dataset(project.dataset)
-        self.project_state = OperatorProjectState(dataset=project.dataset)
+        self.project_state = restored
+        self.template_page.inspection = None
+        self.template_page.placeholder_list.clear()
+        self.template_page.file_name.setText("—")
+        self.template_page.hash_label.setText("—")
+        self.template_page.continue_button.setEnabled(False)
+        if restored.template is not None:
+            self.template_page.set_inspection(restored.template)
+        self.match_page.set_context(
+            project.dataset,
+            restored.template.names if restored.template is not None else (),
+        )
+        if restored.plan is not None:
+            try:
+                self.match_page.set_plan(restored.plan)
+            except ValueError:
+                repair_code = "project.resume_mapping_repair"
+                target_step = "mapping"
+                restored = replace(restored, plan=None, outputs=None, warning_ack_revision=None)
+                self.project_state = restored
+                project = self._clear_invalid_project_state(project, "mapping", target_step)
+                self._loaded_project = project
+                self.match_page.set_context(project.dataset, restored.template.names)
+        self.review_page.clear_preview()
+        self.review_page.set_issues(())
+        self.review_page.recipient_selector.clear()
+        self.review_page.values_table.setRowCount(0)
+        if restored.plan is not None:
+            self.review_page.set_context(project.dataset, restored.plan)
+        self.output_page.set_order(project.dataset.order)
+        if restored.outputs is not None:
+            self.output_page.set_options(restored.outputs)
+        else:
+            self.output_page.destination.clear()
         self.state = WorkspaceState(
-            current_step=project.active_step if project.active_step in STEP_IDS else "data",
-            completed_steps=tuple(
-                step for step in STEP_IDS if STEP_IDS.index(step) < STEP_IDS.index(project.active_step)
-            ) if project.active_step in STEP_IDS else (),
+            current_step=target_step,
+            completed_steps=STEP_IDS[:STEP_IDS.index(target_step)],
             project_path=Path(path),
             project_revision=project.revision,
         )
@@ -400,10 +453,98 @@ class WorkspaceWindow(QMainWindow):
         self._refresh_recent_projects()
         self._attach_store(store)
         self._set_save_state(SaveState.READ_ONLY if store.read_only else SaveState.SAVED)
+        self._set_read_only_mode(store.read_only)
         self.set_locale(project.locale)
+        self.banner.clear()
+        if repair_code is not None:
+            self.banner.show_issue(repair_code, self.catalogs.text(repair_code))
+            if self.coordinator is not None:
+                self.coordinator.mark_dirty(project)
+                self._set_save_state(SaveState.SAVING)
         self.root_stack.setCurrentWidget(self.workspace_surface)
         self._show_step(self.state.current_step)
         self._update_migration_status()
+
+    def _restore_project_state(
+        self, project: ProjectState
+    ) -> tuple[ProjectState, OperatorProjectState, str, str | None]:
+        restored = OperatorProjectState(dataset=project.dataset)
+        maximum = "template"
+        repair_code = None
+        if project.template_path is not None:
+            try:
+                path = project.template_path
+                if not path.is_file() or sha256(path.read_bytes()).hexdigest() != project.template_sha256:
+                    raise ValueError("template bytes changed")
+                inspector = getattr(self.services, "inspect_template", None)
+                inspection = inspector(path) if callable(inspector) else inspect_template(path)
+                saved_inspection = project.template_inspection
+                if inspection.sha256 != project.template_sha256 or (
+                    saved_inspection is not None and (
+                        saved_inspection.get("sha256") != inspection.sha256
+                        or tuple(saved_inspection.get("names", ())) != inspection.names
+                    )
+                ):
+                    raise ValueError("template inspection changed")
+                restored = replace(restored, template=inspection)
+                maximum = "mapping"
+            except Exception:
+                repair_code = "project.resume_template_repair"
+        elif project.active_step in STEP_IDS[2:]:
+            repair_code = "project.resume_template_repair"
+        if restored.template is not None and project.mapping_plan is not None:
+            try:
+                plan = MappingPlan.from_json(project.mapping_plan)
+                if plan.unresolved(restored.template.names) or set(plan.sources) != set(restored.template.names):
+                    raise ValueError("incomplete mapping")
+                for row_id in project.dataset.order:
+                    evaluate_plan(plan, project.dataset, row_id)
+                restored = replace(
+                    restored, plan=plan,
+                    warning_ack_revision=(project.dataset.revision if project.acknowledgements else None),
+                )
+                maximum = "output"
+            except Exception:
+                repair_code = "project.resume_mapping_repair"
+        elif restored.template is not None and project.active_step in STEP_IDS[3:]:
+            repair_code = "project.resume_mapping_repair"
+        if restored.plan is not None and project.output_options is not None:
+            try:
+                options = OutputOptions.from_json(project.output_options)
+                if set(options.row_ids) != set(project.dataset.order) or not options.destination.is_dir():
+                    raise ValueError("output order changed")
+                restored = replace(restored, outputs=options)
+                maximum = "generate"
+            except Exception:
+                repair_code = "project.resume_output_repair"
+        elif restored.plan is not None and project.active_step == "generate":
+            repair_code = "project.resume_output_repair"
+        requested = project.active_step if project.active_step in STEP_IDS else "data"
+        target = STEP_IDS[min(STEP_IDS.index(requested), STEP_IDS.index(maximum))]
+        if requested != target and repair_code is None:
+            repair_code = {
+                "template": "project.resume_template_repair",
+                "mapping": "project.resume_mapping_repair",
+                "output": "project.resume_output_repair",
+            }.get(maximum)
+        if repair_code is not None:
+            project = self._clear_invalid_project_state(project, maximum, target)
+        return project, restored, target, repair_code
+
+    @staticmethod
+    def _clear_invalid_project_state(
+        project: ProjectState, maximum: str, target: str
+    ) -> ProjectState:
+        cleared = {"revision": project.revision + 1, "active_step": target,
+                   "approval": None, "preview_revision": None}
+        if maximum == "template":
+            cleared.update(template_inspection=None, mapping_plan=None,
+                           output_options=None, acknowledgements=())
+        elif maximum == "mapping":
+            cleared.update(mapping_plan=None, output_options=None, acknowledgements=())
+        elif maximum == "output":
+            cleared.update(output_options=None)
+        return replace(project, **cleared)
 
     def open_project(self, path: Path) -> None:
         self.load_project(path)
@@ -421,6 +562,63 @@ class WorkspaceWindow(QMainWindow):
         coordinator.save_failed.connect(self._project_save_failed)
         self.coordinator = coordinator
 
+    def _set_read_only_mode(self, read_only: bool) -> None:
+        self._read_only = read_only
+        self.read_only_notice.setText(self.catalogs.text("workspace.read_only_explanation"))
+        self.read_only_notice.setVisible(read_only)
+        self.data_page.model.set_read_only(read_only)
+        self.data_page.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers if read_only
+            else QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.AnyKeyPressed
+        )
+        self.review_page.values_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        data_controls = (
+            self.data_page.excel_button, self.data_page.delimited_button,
+            self.data_page.paste_button, self.data_page.manual_button,
+            self.data_page.add_row_button, self.data_page.remove_row_button,
+            self.data_page.add_column_button, self.data_page.rename_column_button,
+            self.data_page.remove_column_button, self.data_page.undo_button,
+            self.data_page.redo_button, self.data_page.continue_button,
+        )
+        template_controls = (
+            self.template_page.choose_button, self.template_page.continue_button,
+        )
+        review_controls = (
+            self.review_page.preview_button, self.review_page.acknowledge_button,
+            self.review_page.continue_button,
+        )
+        output_controls = (
+            self.output_page.docx, self.output_page.individual_pdf,
+            self.output_page.combined_pdf, self.output_page.destination,
+            self.output_page.browse_button, self.output_page.batch_name,
+            self.output_page.continue_button,
+        )
+        for control in (*data_controls, *template_controls, *review_controls, *output_controls):
+            control.setEnabled(not read_only)
+        for card in self.match_page.cards.values():
+            for control in (
+                card.type_combo, card.column_combo, card.fixed_input,
+                card.input_format, card.output_format,
+            ):
+                control.setEnabled(not read_only)
+        if read_only:
+            self.match_page.continue_button.setEnabled(False)
+        else:
+            self.match_page._changed()
+        self.results_page.generate_button.setEnabled(not read_only)
+        self.results_page.cancel_button.setEnabled(False if read_only else self.results_page.cancel_button.isEnabled())
+        if not read_only:
+            self.data_page.undo_button.setEnabled(self.data_page.model.undo_stack.canUndo())
+            self.data_page.redo_button.setEnabled(self.data_page.model.undo_stack.canRedo())
+            self.data_page.continue_button.setEnabled(bool(self.data_page.model.dataset.rows))
+            self.template_page.continue_button.setEnabled(
+                bool(self.template_page.inspection and self.template_page.inspection.placeholders)
+            )
+
     def _set_save_state(self, state: SaveState) -> None:
         self.save_state = state
         label = self.catalogs.text(f"save_state.{state.value}")
@@ -428,6 +626,11 @@ class WorkspaceWindow(QMainWindow):
         self.save_state_label.setAccessibleName(label)
         self.home.save_state_label.setText(label)
         self.home.save_state_label.setAccessibleName(label)
+        self.retry_save_button.setVisible(
+            state == SaveState.FAILED
+            and self.coordinator is not None
+            and self.coordinator.has_pending
+        )
 
     def _project_saved(self, _revision: int) -> None:
         self._set_save_state(SaveState.SAVED)
@@ -437,6 +640,10 @@ class WorkspaceWindow(QMainWindow):
 
     def _project_save_failed(self, _error: Exception) -> None:
         self._set_save_state(SaveState.FAILED)
+
+    def _retry_save(self) -> None:
+        if self.coordinator is not None:
+            self.coordinator.flush()
 
     def _mark_project_dirty(self) -> None:
         if self.coordinator is None or self._loaded_project is None:
@@ -519,8 +726,13 @@ class WorkspaceWindow(QMainWindow):
         self.setWindowTitle(self.catalogs.text("app.title"))
         self.home.retranslate()
         self.product_label.setText(self.catalogs.text("app.title"))
+        self.home_button.setText(self.catalogs.text("action.home"))
+        self.home_button.setAccessibleName(self.home_button.text())
+        self.read_only_notice.setText(self.catalogs.text("workspace.read_only_explanation"))
         self.draft_label.setText(self.catalogs.text("workspace.untitled"))
         self._set_save_state(self.save_state)
+        self.retry_save_button.setText(self.catalogs.text("save_state.retry"))
+        self.retry_save_button.setAccessibleName(self.retry_save_button.text())
         self.locale_label.setText(self.catalogs.text("workspace.language"))
         self.locale_selector.setAccessibleName(self.catalogs.text("workspace.language"))
         self.back_button.setText(self.catalogs.text("action.back"))
@@ -551,19 +763,27 @@ class WorkspaceWindow(QMainWindow):
         self.root_stack.setCurrentWidget(self.home)
 
     def _show_step(self, step: str) -> None:
+        changed = step != self.state.current_step
         self.state = replace(self.state, current_step=step)
         self.page_stack.setCurrentWidget(self._page_by_step[step])
         self.step_rail.set_state(step, self.state.completed_steps)
         index = STEP_IDS.index(step)
         self.back_button.setEnabled(index > 0)
         self.next_button.setEnabled(index < len(STEP_IDS) - 1)
+        if changed and self.coordinator is not None:
+            self.state = replace(self.state, project_revision=self.state.project_revision + 1)
+            self._mark_project_dirty()
 
     def _accept_data(self, _dataset: TabularDataset) -> None:
+        if self._read_only:
+            return
         self.project_state = replace(self.project_state, dataset=_dataset)
         self.mark_step_complete("data")
         self.navigate("template")
 
     def _import_source(self, kind: str) -> None:
+        if self._read_only:
+            return
         if kind == "manual":
             creator = getattr(self.services, "create_manual_dataset", None)
             if callable(creator):
@@ -674,6 +894,8 @@ class WorkspaceWindow(QMainWindow):
             self._show_import_error(error)
 
     def _paste_source(self) -> None:
+        if self._read_only:
+            return
         try:
             text = QApplication.clipboard().text()
             inspect = self.services.inspect_clipboard(text)
@@ -732,6 +954,10 @@ class WorkspaceWindow(QMainWindow):
     def _data_changed(self, _dataset: TabularDataset) -> None:
         if not hasattr(self, "save_state_label"):
             return
+        if self._read_only and self._loaded_project is not None:
+            if _dataset != self._loaded_project.dataset:
+                self.data_page.set_dataset(self._loaded_project.dataset)
+            return
         completed = tuple(step for step in self.state.completed_steps if step == "data")
         self.project_state = replace(
             self.project_state,
@@ -745,9 +971,18 @@ class WorkspaceWindow(QMainWindow):
             completed_steps=completed,
             project_revision=self.state.project_revision + 1,
         )
+        if self._loaded_project is not None:
+            self._loaded_project = replace(
+                self._loaded_project,
+                acknowledgements=(), approval=None, preview_revision=None,
+            )
+        self.review_page.clear_preview()
+        self.review_page.set_issues(())
         self._mark_project_dirty()
 
     def _select_template(self, path: Path) -> None:
+        if self._read_only:
+            return
         try:
             inspection = self.services.inspect_template(Path(path))
         except Exception as error:
@@ -756,8 +991,38 @@ class WorkspaceWindow(QMainWindow):
             )
             return
         self.template_page.set_inspection(inspection)
+        if self._loaded_project is not None and (
+            self._loaded_project.template_path != inspection.path
+            or self._loaded_project.template_sha256 != inspection.sha256
+        ):
+            self.project_state = replace(
+                self.project_state, template=None, plan=None, outputs=None,
+                warning_ack_revision=None,
+            )
+            self._loaded_project = replace(
+                self._loaded_project,
+                template_path=inspection.path,
+                template_sha256=inspection.sha256,
+                template_inspection=None,
+                mapping_plan=None,
+                output_options=None,
+                acknowledgements=(),
+                approval=None,
+                preview_revision=None,
+            )
+            self.review_page.clear_preview()
+            self.review_page.set_issues(())
+            self.state = replace(
+                self.state,
+                completed_steps=tuple(step for step in self.state.completed_steps if step == "data"),
+                project_revision=self.state.project_revision + 1,
+            )
+            self._show_step("template")
+            self._mark_project_dirty()
 
     def _accept_template(self, inspection) -> None:
+        if self._read_only:
+            return
         self.project_state = replace(
             self.project_state,
             template=inspection,
@@ -769,12 +1034,22 @@ class WorkspaceWindow(QMainWindow):
             self.project_state.dataset,
             inspection.names,
         )
+        if self._loaded_project is not None:
+            self._loaded_project = replace(
+                self._loaded_project,
+                template_path=inspection.path,
+                template_sha256=inspection.sha256,
+                template_inspection={"sha256": inspection.sha256, "names": list(inspection.names)},
+                acknowledgements=(), approval=None, preview_revision=None,
+            )
         self.state = replace(self.state, project_revision=self.state.project_revision + 1)
         self._mark_project_dirty()
         self.mark_step_complete("template")
         self.navigate("mapping")
 
     def _accept_plan(self, plan: MappingPlan) -> None:
+        if self._read_only:
+            return
         self.project_state = replace(
             self.project_state,
             plan=plan,
@@ -788,6 +1063,8 @@ class WorkspaceWindow(QMainWindow):
         self.navigate("review")
 
     def _accept_review(self) -> None:
+        if self._read_only:
+            return
         self.output_page.set_order(self.project_state.dataset.order)
         availability = getattr(self.services, "word_availability", None)
         if callable(availability):
@@ -796,6 +1073,8 @@ class WorkspaceWindow(QMainWindow):
         self.navigate("output")
 
     def _accept_outputs(self, outputs: OutputOptions) -> None:
+        if self._read_only:
+            return
         self.project_state = replace(self.project_state, outputs=outputs)
         self.state = replace(self.state, project_revision=self.state.project_revision + 1)
         self._mark_project_dirty()
@@ -807,6 +1086,8 @@ class WorkspaceWindow(QMainWindow):
         self.data_page.focus_cell(row_id, column_id)
 
     def _acknowledge_warnings(self) -> None:
+        if self._read_only:
+            return
         dataset = self.project_state.dataset
         self.project_state = replace(
             self.project_state,
@@ -835,6 +1116,8 @@ class WorkspaceWindow(QMainWindow):
         self.review_page.set_preview(record.pdf_path)
 
     def start_generation(self) -> None:
+        if self._read_only:
+            return
         if self._thread is not None:
             return
         current = self.project_state

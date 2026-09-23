@@ -78,6 +78,14 @@ class OutputPage(QWidget):
         self.order_list.addItems(self._order)
         self._update_summary()
 
+    def set_options(self, options: OutputOptions) -> None:
+        self.set_order(options.row_ids)
+        self.docx.setChecked(options.docx)
+        self.individual_pdf.setChecked(options.individual_pdf)
+        self.combined_pdf.setChecked(options.combined_pdf)
+        self.destination.setText(str(options.destination))
+        self.batch_name.setText(options.batch_name)
+
     def options(self, generation_order: tuple[str, ...] | None = None) -> OutputOptions:
         return OutputOptions(
             self.docx.isChecked(),

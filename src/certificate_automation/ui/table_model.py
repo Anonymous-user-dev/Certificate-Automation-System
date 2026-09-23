@@ -35,6 +35,7 @@ class DatasetTableModel(QAbstractTableModel):
     ) -> None:
         super().__init__(parent)
         self._dataset = dataset
+        self._read_only = False
         self._catalogs = catalogs or CatalogSet.load(package_root())
         self._issues: dict[tuple[str, str], tuple[Issue, ...]] = {}
         self._filter = ""
@@ -89,14 +90,17 @@ class DatasetTableModel(QAbstractTableModel):
     def flags(self, index: QModelIndex):
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
-        return (
+        flags = (
             Qt.ItemFlag.ItemIsEnabled
             | Qt.ItemFlag.ItemIsSelectable
-            | Qt.ItemFlag.ItemIsEditable
         )
+        return flags if self._read_only else flags | Qt.ItemFlag.ItemIsEditable
+
+    def set_read_only(self, read_only: bool) -> None:
+        self._read_only = bool(read_only)
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
-        if role != Qt.ItemDataRole.EditRole or not index.isValid():
+        if self._read_only or role != Qt.ItemDataRole.EditRole or not index.isValid():
             return False
         row_id = self.row_id_at(index.row())
         column_id = self.column_id_at(index.column())
