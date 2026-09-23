@@ -50,7 +50,11 @@ def _read_only_connection(path: Path) -> sqlite3.Connection:
 
 
 class ProjectMigrationLease:
-    """Nonblocking OS lease against SQLite writers while migrating a project."""
+    """Nonblocking OS lease keeping SQLite quiescent during migration.
+
+    Readers must also be excluded: opening a WAL database can initialize SHM,
+    and a read transaction can change its read marks before any writer lock.
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -88,24 +92,31 @@ class ProjectMigrationLease:
         if os.name == "nt":
             self._open_windows_handle(path)
         elif sys.platform == "linux":
-            self._lock_linux(path, 1073741825, 1)
-            self._lock_linux(path, 1073741826, 510)
+            self._lock_linux(path, 1073741824, 512)
 
     def _acquire_linux(self) -> None:
-        self._lock_linux(self.path, 1073741825, 1)  # SQLite RESERVED_BYTE
-        self._lock_linux(self.path, 1073741826, 510)  # SQLite shared-lock range
+        # PENDING, RESERVED and the full SHARED range. WAL connections retain
+        # a SHARED main-file lock even outside a transaction; reject them too.
+        # Acquiring this before opening SHM prevents new connections from
+        # creating, truncating, mapping, or updating that file in the gap.
+        self._lock_linux(self.path, 1073741824, 512)
         shm = Path(f"{self.path}-shm")
         if shm.is_file():
-            self._lock_linux(shm, 120, 3)  # WAL write, checkpoint, and recovery locks
+            # SQLite unix VFS: write/checkpoint/recovery (120..122), reader
+            # marks (123..127), and the dead-man-switch (128). A shared DMS
+            # lock alone would permit connections to map and change SHM.
+            self._lock_linux(shm, 120, 9)
         elif Path(f"{self.path}-wal").exists():
             raise ProjectMigrationError("project.migration_source_busy")
 
     def _lock_linux(self, path: Path, offset: int, length: int) -> None:
         import fcntl
 
-        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+        # A write-capable descriptor is required for F_WRLCK; neither opening
+        # the existing file nor taking this advisory lock writes any bytes.
+        descriptor = os.open(path, os.O_RDWR | os.O_CLOEXEC)
         self._descriptors.append(descriptor)
-        request = struct.pack("hhqqi4x", fcntl.F_RDLCK, os.SEEK_SET, offset, length, 0)
+        request = struct.pack("hhqqi4x", fcntl.F_WRLCK, os.SEEK_SET, offset, length, 0)
         try:
             fcntl.fcntl(descriptor, fcntl.F_OFD_SETLK, request)
         except OSError as error:
@@ -185,7 +196,7 @@ class ProjectMigrationService:
             self._remove_temporary(source_snapshot)
             source_snapshot = None
             lease.protect_replacement(migrated_temp)
-            self._publish(migrated_temp, path, source_state)
+            self._publish(migrated_temp, path, source_state, lease)
             migrated_temp = None
             return MigrationResult(path, backup_path, 1, 2)
         except ProjectMigrationError:
@@ -244,8 +255,10 @@ class ProjectMigrationService:
     def _publish(
         self, migrated: Path, path: Path,
         expected: tuple[str | None, str | None, str | None],
+        lease: ProjectMigrationLease,
     ) -> None:
         self._assert_source_unchanged(path, expected)
+        migrated_digest = self._file_digest(migrated)
         rollback_db = self._temporary(path)
         quarantined: list[tuple[Path, Path, str]] = []
         replaced_db = False
@@ -255,6 +268,9 @@ class ProjectMigrationService:
             shutil.copyfile(path, rollback_db)
             if self._file_digest(rollback_db) != expected[0]:
                 raise ProjectMigrationError("project.migration_source_changed")
+            # Rollback installs this inode at the source pathname. Protect it
+            # before publication, just like the migrated replacement inode.
+            lease.protect_replacement(rollback_db)
             if expected[1] is not None:
                 wal = Path(f"{path}-wal")
                 stash = self._temporary(path)
@@ -279,6 +295,12 @@ class ProjectMigrationService:
                 raise ProjectMigrationError("project.migration_source_changed")
             published = True
         except Exception:
+            # A filesystem boundary may move the DB and then raise. Infer that
+            # completed move from the paths/content, not just its return value.
+            if not migrated.exists() and self._file_digest(path) == migrated_digest:
+                replaced_db = True
+            if replaced_db and self._file_digest(path) != migrated_digest:
+                raise ProjectMigrationError("project.migration_rollback_failed")
             for sidecar, stash, digest in reversed(quarantined):
                 if sidecar.exists():
                     if self._file_digest(sidecar) != digest:

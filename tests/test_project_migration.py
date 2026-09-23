@@ -2,6 +2,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -365,6 +366,103 @@ def test_lease_excludes_writer_at_final_replace(schema1_project):
     assert writer_blocked
     assert not lease_active
     assert ProjectStore.open(schema1_project).load().schema_version == 2
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="exercises Linux SQLite POSIX locks")
+@pytest.mark.parametrize("fail_after_replace", [False, True])
+@pytest.mark.parametrize("probe_at", ["snapshot", "final_replace"])
+def test_real_sqlite_writer_at_final_replace_preserves_publication(
+    schema1_project, fail_after_replace, probe_at,
+):
+    _leave_pending_wal(schema1_project)
+    paths = [schema1_project, Path(f"{schema1_project}-wal"), Path(f"{schema1_project}-shm")]
+    before = {path: path.read_bytes() for path in paths}
+    probes = []
+    script = """
+import sqlite3
+import sys
+connection = sqlite3.connect(sys.argv[1], timeout=0)
+try:
+    connection.execute('BEGIN IMMEDIATE')
+except sqlite3.OperationalError as error:
+    print(error.sqlite_errorname)
+else:
+    print('WRITER_ENTERED')
+finally:
+    connection.close()
+"""
+
+    def probe_writer():
+        probes.append(subprocess.run(
+            [sys.executable, "-c", script, str(schema1_project)],
+            capture_output=True, text=True, check=True, timeout=30,
+        ).stdout.strip())
+
+    class ProbingService(ProjectMigrationService):
+        @staticmethod
+        def _snapshot_source(source, destination):
+            if probe_at == "snapshot":
+                probe_writer()
+            ProjectMigrationService._snapshot_source(source, destination)
+
+    class ProbingFiles(ProjectMigrationFiles):
+        def replace(self, source, destination):
+            if destination == schema1_project and probe_at == "final_replace":
+                probe_writer()
+            if fail_after_replace and source.name.endswith("-shm"):
+                raise PermissionError("SHM publication denied")
+            return super().replace(source, destination)
+
+    service = ProbingService(files=ProbingFiles())
+    if fail_after_replace:
+        with pytest.raises(ProjectMigrationError) as caught:
+            service.migrate(schema1_project)
+        assert caught.value.code == "project.migration_failed"
+        assert {path: path.read_bytes() if path.exists() else None for path in paths} == before
+    else:
+        result = service.migrate(schema1_project)
+        assert ProjectStore.open(schema1_project).load().schema_version == 2
+        assert ProjectStore.open(result.backup_path).load().schema_version == 1
+    assert probes == ["SQLITE_BUSY"]
+    assert not list(schema1_project.parent.glob(".source.certproject.*.tmp*"))
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="exercises Linux SQLite POSIX locks")
+@pytest.mark.parametrize("failure", ["db_moved", "late_shm"])
+def test_rollback_restores_leased_database_after_publication_failure(
+    schema1_project, monkeypatch, failure,
+):
+    _leave_pending_wal(schema1_project)
+    paths = [schema1_project, Path(f"{schema1_project}-wal"), Path(f"{schema1_project}-shm")]
+    before = {path: path.read_bytes() for path in paths}
+    original_replace = os.replace
+    writer_results = []
+
+    def probe_after_replace(source, destination):
+        original_replace(source, destination)
+        if destination == schema1_project:
+            probe = subprocess.run(
+                [sys.executable, "-c", "import sqlite3,sys; c=sqlite3.connect(sys.argv[1], timeout=0); c.execute('BEGIN IMMEDIATE')", str(schema1_project)],
+                capture_output=True, text=True, timeout=30,
+            )
+            writer_results.append(probe.returncode != 0 and "database is locked" in probe.stderr)
+
+    class FailingFiles(ProjectMigrationFiles):
+        def replace(self, source, destination):
+            if failure == "late_shm" and source.name.endswith("-shm"):
+                raise PermissionError("late SHM publication failure")
+            super().replace(source, destination)
+            if failure == "db_moved" and destination == schema1_project:
+                raise PermissionError("database moved, then failure")
+
+    monkeypatch.setattr(os, "replace", probe_after_replace)
+    with pytest.raises(ProjectMigrationError) as caught:
+        ProjectMigrationService(files=FailingFiles()).migrate(schema1_project)
+
+    assert caught.value.code == "project.migration_failed"
+    assert {path: path.read_bytes() if path.exists() else None for path in paths} == before
+    assert writer_results == [True, True]  # Both installed and restored DBs stay leased.
+    assert not list(schema1_project.parent.glob(".source.certproject.*.tmp*"))
 
 
 def test_snapshot_cleanup_failure_never_reports_failed_migration_after_publication(
