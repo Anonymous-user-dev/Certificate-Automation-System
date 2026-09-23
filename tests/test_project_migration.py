@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -239,6 +240,131 @@ def test_locked_sidecar_publication_restores_source_without_temp_leaks(schema1_p
     assert caught.value.code == "project.migration_failed"
     assert {path: path.read_bytes() for path in paths} == before
     assert not list(schema1_project.parent.glob(".source.certproject.*.tmp"))
+
+
+@pytest.mark.parametrize("sidecar", ["-wal", "-shm"])
+def test_sidecar_move_then_raise_restores_all_original_bytes(schema1_project, sidecar):
+    _leave_pending_wal(schema1_project)
+    paths = [schema1_project, Path(f"{schema1_project}-wal"), Path(f"{schema1_project}-shm")]
+    before = {path: path.read_bytes() for path in paths}
+
+    class MoveThenRaiseFiles(ProjectMigrationFiles):
+        def replace(self, source, destination):
+            if source.name.endswith(sidecar):
+                super().replace(source, destination)
+                raise PermissionError("moved, then denied")
+            return super().replace(source, destination)
+
+    with pytest.raises(ProjectMigrationError) as caught:
+        ProjectMigrationService(files=MoveThenRaiseFiles()).migrate(schema1_project)
+
+    assert caught.value.code == "project.migration_failed"
+    assert {path: path.read_bytes() for path in paths} == before
+    assert not list(schema1_project.parent.glob(".source.certproject.*.tmp"))
+
+
+def test_postreplace_shm_failure_restores_original_set(schema1_project):
+    _leave_pending_wal(schema1_project)
+    paths = [schema1_project, Path(f"{schema1_project}-wal"), Path(f"{schema1_project}-shm")]
+    before = {path: path.read_bytes() for path in paths}
+    saw_database_replace = False
+
+    class LateShmFailure(ProjectMigrationFiles):
+        def replace(self, source, destination):
+            nonlocal saw_database_replace
+            if destination == schema1_project:
+                saw_database_replace = True
+            if saw_database_replace and source.name.endswith("-shm"):
+                raise PermissionError("late SHM move denied")
+            return super().replace(source, destination)
+
+    with pytest.raises(ProjectMigrationError) as caught:
+        ProjectMigrationService(files=LateShmFailure()).migrate(schema1_project)
+
+    assert saw_database_replace
+    assert caught.value.code == "project.migration_failed"
+    assert {path: path.read_bytes() for path in paths} == before
+    assert not list(schema1_project.parent.glob(".source.certproject.*.tmp"))
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="exercises Linux SQLite POSIX locks")
+@pytest.mark.parametrize("journal_mode", ["WAL", "DELETE"])
+def test_active_sqlite_writer_rejects_migration_without_changing_source(schema1_project, journal_mode):
+    script = """
+import sqlite3
+import sys
+connection = sqlite3.connect(sys.argv[1], timeout=0)
+connection.execute('PRAGMA journal_mode=' + sys.argv[2])
+connection.execute('BEGIN IMMEDIATE')
+connection.execute("UPDATE revisions SET saved_at='writer-pending' WHERE revision=2")
+print('READY', flush=True)
+sys.stdin.readline()
+connection.rollback()
+connection.close()
+"""
+    writer = subprocess.Popen(
+        [sys.executable, "-c", script, str(schema1_project), journal_mode],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert writer.stdout.readline().strip() == "READY"
+        paths = [
+            schema1_project, Path(f"{schema1_project}-wal"),
+            Path(f"{schema1_project}-shm"), Path(f"{schema1_project}-journal"),
+        ]
+        before = {path: path.read_bytes() if path.exists() else None for path in paths}
+
+        started = time.monotonic()
+        with pytest.raises(ProjectMigrationError) as caught:
+            ProjectMigrationService().migrate(schema1_project)
+        elapsed = time.monotonic() - started
+
+        assert caught.value.code == "project.migration_source_busy"
+        assert elapsed < 2
+        assert {path: path.read_bytes() if path.exists() else None for path in paths} == before
+    finally:
+        writer.stdin.write("\n")
+        writer.stdin.flush()
+        writer.communicate(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="exercises Linux SQLite POSIX locks")
+def test_lease_excludes_writer_at_final_replace(schema1_project):
+    from certificate_automation.project_migration import ProjectMigrationLease
+
+    _leave_pending_wal(schema1_project)
+    lease_active = False
+    writer_blocked = False
+
+    class TrackingLease(ProjectMigrationLease):
+        def __enter__(self):
+            nonlocal lease_active
+            result = super().__enter__()
+            lease_active = True
+            return result
+
+        def __exit__(self, *args):
+            nonlocal lease_active
+            lease_active = False
+            return super().__exit__(*args)
+
+    class ProbingFiles(ProjectMigrationFiles):
+        def replace(self, source, destination):
+            nonlocal writer_blocked
+            if destination == schema1_project:
+                assert lease_active
+                probe = subprocess.run(
+                    [sys.executable, "-c", "import fcntl,os,sys; fd=os.open(sys.argv[1],os.O_RDWR); fcntl.lockf(fd,fcntl.LOCK_EX|fcntl.LOCK_NB,1,120)", f"{schema1_project}-shm"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                writer_blocked = probe.returncode != 0 and "BlockingIOError" in probe.stderr
+            return super().replace(source, destination)
+
+    ProjectMigrationService(files=ProbingFiles(), lease_factory=TrackingLease).migrate(schema1_project)
+
+    assert writer_blocked
+    assert not lease_active
+    assert ProjectStore.open(schema1_project).load().schema_version == 2
 
 
 def test_snapshot_cleanup_failure_never_reports_failed_migration_after_publication(
