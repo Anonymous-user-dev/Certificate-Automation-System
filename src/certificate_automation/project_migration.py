@@ -8,6 +8,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import tempfile
 
@@ -30,7 +31,7 @@ class ProjectMigrationFiles:
     """Narrow filesystem boundary for fault injection and SQLite-safe copying."""
 
     def copy_database(self, source: Path, destination: Path) -> None:
-        with closing(sqlite3.connect(source)) as source_connection:
+        with closing(_read_only_connection(source)) as source_connection:
             with closing(sqlite3.connect(destination)) as destination_connection:
                 source_connection.backup(destination_connection)
         with destination.open("rb") as copied:
@@ -40,6 +41,10 @@ class ProjectMigrationFiles:
         os.replace(source, destination)
 
 
+def _read_only_connection(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+
+
 class ProjectMigrationService:
     def __init__(self, *, files: ProjectMigrationFiles | None = None) -> None:
         self._files = files or ProjectMigrationFiles()
@@ -47,12 +52,15 @@ class ProjectMigrationService:
     def migrate(self, path: Path) -> MigrationResult:
         path = Path(path)
         backup_path = path.with_name(f"{path.name}.pre-v2-backup")
+        source_snapshot: Path | None = None
         backup_temp: Path | None = None
         migrated_temp: Path | None = None
         try:
-            self._validate(path, version=1)
+            source_snapshot = self._temporary(path)
+            self._snapshot_source(path, source_snapshot)
+            self._validate(source_snapshot, version=1)
             backup_temp = self._temporary(path)
-            self._files.copy_database(path, backup_temp)
+            self._files.copy_database(source_snapshot, backup_temp)
             self._validate(backup_temp, version=1, code="project.migration_invalid_backup")
             self._files.replace(backup_temp, backup_path)
             backup_temp = None
@@ -69,9 +77,10 @@ class ProjectMigrationService:
         except (OSError, sqlite3.Error, ProjectError, ValueError, TypeError, KeyError) as error:
             raise ProjectMigrationError("project.migration_failed") from error
         finally:
-            for temporary in (backup_temp, migrated_temp):
+            for temporary in (source_snapshot, backup_temp, migrated_temp):
                 if temporary is not None:
-                    temporary.unlink(missing_ok=True)
+                    for suffix in ("", "-wal", "-shm"):
+                        Path(f"{temporary}{suffix}").unlink(missing_ok=True)
 
     @staticmethod
     def _temporary(path: Path) -> Path:
@@ -80,8 +89,15 @@ class ProjectMigrationService:
         return Path(name)
 
     @staticmethod
+    def _snapshot_source(source: Path, destination: Path) -> None:
+        shutil.copyfile(source, destination)
+        source_wal = Path(f"{source}-wal")
+        if source_wal.is_file():
+            shutil.copyfile(source_wal, Path(f"{destination}-wal"))
+
+    @staticmethod
     def _validate(
-        path: Path, *, version: int, code: str = "project.migration_invalid_source"
+        path: Path, *, version: int, code: str = "project.migration_invalid_source",
     ) -> None:
         try:
             store = ProjectStore.open(path)
@@ -103,7 +119,10 @@ class ProjectMigrationService:
                 if state.schema_version != version:
                     raise ValueError("payload schema mismatch")
             store.load()
-        except (OSError, sqlite3.Error, ProjectError, ValueError, TypeError, KeyError) as error:
+        except (
+            OSError, sqlite3.Error, ProjectError, ValueError, TypeError, KeyError,
+            AttributeError, IndexError, OverflowError,
+        ) as error:
             raise ProjectMigrationError(code) from error
 
     @staticmethod

@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import sqlite3
+import subprocess
+import sys
 
 import pytest
 
@@ -104,6 +106,60 @@ def test_truncated_sqlite_fails_without_changing_bytes(tmp_path):
 def test_wrong_newest_payload_hash_fails_without_changing_bytes(schema1_project):
     with closing(sqlite3.connect(schema1_project)) as connection, connection:
         connection.execute("UPDATE revisions SET payload_sha256='bad' WHERE revision=2")
+    before = schema1_project.read_bytes()
+
+    with pytest.raises(ProjectMigrationError) as caught:
+        ProjectMigrationService().migrate(schema1_project)
+
+    assert caught.value.code == "project.migration_invalid_source"
+    assert schema1_project.read_bytes() == before
+
+
+@pytest.mark.parametrize("failure", ["disk_full", "replacement_locked"])
+def test_pending_wal_failure_preserves_all_source_bytes(schema1_project, failure):
+    script = """
+import os
+import sqlite3
+import sys
+connection = sqlite3.connect(sys.argv[1])
+connection.execute('PRAGMA journal_mode=WAL')
+connection.execute('PRAGMA wal_autocheckpoint=0')
+connection.execute("UPDATE revisions SET saved_at='2026-09-23T12:00:00+00:00' WHERE revision=2")
+connection.commit()
+os._exit(0)
+"""
+    subprocess.run([sys.executable, "-c", script, str(schema1_project)], check=True)
+    wal = schema1_project.with_name(f"{schema1_project.name}-wal")
+    shm = schema1_project.with_name(f"{schema1_project.name}-shm")
+    assert wal.is_file() and wal.stat().st_size > 0
+    before = {path: path.read_bytes() if path.exists() else None for path in (schema1_project, wal, shm)}
+
+    with pytest.raises(ProjectMigrationError) as caught:
+        ProjectMigrationService(files=FaultFiles(failure)).migrate(schema1_project)
+
+    assert caught.value.code.startswith("project.")
+    assert {path: path.read_bytes() if path.exists() else None for path in before} == before
+    if failure == "replacement_locked":
+        backup = schema1_project.with_name(f"{schema1_project.name}.pre-v2-backup")
+        with sqlite3.connect(backup) as connection:
+            saved_at = connection.execute(
+                "SELECT saved_at FROM revisions WHERE revision=2"
+            ).fetchone()[0]
+        assert saved_at == "2026-09-23T12:00:00+00:00"
+
+
+def test_hash_valid_malformed_revision_has_stable_error(schema1_project):
+    with closing(sqlite3.connect(schema1_project)) as connection, connection:
+        payload_text = connection.execute(
+            "SELECT payload_json FROM revisions WHERE revision=2"
+        ).fetchone()[0]
+        payload = json.loads(payload_text)
+        payload["dataset"]["rows"][0]["values"] = []
+        malformed = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        connection.execute(
+            "UPDATE revisions SET payload_json=?, payload_sha256=? WHERE revision=2",
+            (malformed, sha256(malformed.encode("utf-8")).hexdigest()),
+        )
     before = schema1_project.read_bytes()
 
     with pytest.raises(ProjectMigrationError) as caught:
