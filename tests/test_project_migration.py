@@ -2,6 +2,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+from pathlib import Path
 import sqlite3
 import subprocess
 import sys
@@ -115,8 +116,7 @@ def test_wrong_newest_payload_hash_fails_without_changing_bytes(schema1_project)
     assert schema1_project.read_bytes() == before
 
 
-@pytest.mark.parametrize("failure", ["disk_full", "replacement_locked"])
-def test_pending_wal_failure_preserves_all_source_bytes(schema1_project, failure):
+def _leave_pending_wal(path):
     script = """
 import os
 import sqlite3
@@ -128,7 +128,12 @@ connection.execute("UPDATE revisions SET saved_at='2026-09-23T12:00:00+00:00' WH
 connection.commit()
 os._exit(0)
 """
-    subprocess.run([sys.executable, "-c", script, str(schema1_project)], check=True)
+    subprocess.run([sys.executable, "-c", script, str(path)], check=True)
+
+
+@pytest.mark.parametrize("failure", ["disk_full", "replacement_locked"])
+def test_pending_wal_failure_preserves_all_source_bytes(schema1_project, failure):
+    _leave_pending_wal(schema1_project)
     wal = schema1_project.with_name(f"{schema1_project.name}-wal")
     shm = schema1_project.with_name(f"{schema1_project.name}-shm")
     assert wal.is_file() and wal.stat().st_size > 0
@@ -139,6 +144,7 @@ os._exit(0)
 
     assert caught.value.code.startswith("project.")
     assert {path: path.read_bytes() if path.exists() else None for path in before} == before
+    assert not list(schema1_project.parent.glob(".source.certproject.*.tmp"))
     if failure == "replacement_locked":
         backup = schema1_project.with_name(f"{schema1_project.name}.pre-v2-backup")
         with sqlite3.connect(backup) as connection:
@@ -146,6 +152,124 @@ os._exit(0)
                 "SELECT saved_at FROM revisions WHERE revision=2"
             ).fetchone()[0]
         assert saved_at == "2026-09-23T12:00:00+00:00"
+
+
+def test_pending_wal_success_publishes_schema2_without_stale_sidecars(schema1_project):
+    _leave_pending_wal(schema1_project)
+    wal = schema1_project.with_name(f"{schema1_project.name}-wal")
+    shm = schema1_project.with_name(f"{schema1_project.name}-shm")
+    assert wal.is_file() and shm.is_file()
+
+    result = ProjectMigrationService().migrate(schema1_project)
+
+    assert not wal.exists()
+    assert not shm.exists()
+    migrated = ProjectStore.open(schema1_project).load()
+    assert migrated.schema_version == 2
+    assert migrated.revision == 2
+    backup = ProjectStore.open(result.backup_path).load()
+    assert backup.schema_version == 1
+    with sqlite3.connect(result.backup_path) as connection:
+        saved_at = connection.execute(
+            "SELECT saved_at FROM revisions WHERE revision=2"
+        ).fetchone()[0]
+    assert saved_at == "2026-09-23T12:00:00+00:00"
+
+
+@pytest.mark.parametrize("sidecar", ["-wal", "-shm"])
+def test_changed_source_sidecar_blocks_publication(schema1_project, sidecar):
+    _leave_pending_wal(schema1_project)
+    source_sidecar = schema1_project.with_name(f"{schema1_project.name}{sidecar}")
+    original_db = schema1_project.read_bytes()
+    original_wal = schema1_project.with_name(f"{schema1_project.name}-wal").read_bytes()
+
+    class ChangingFiles(ProjectMigrationFiles):
+        def replace(self, source, destination):
+            super().replace(source, destination)
+            if destination.name.endswith(".pre-v2-backup"):
+                source_sidecar.write_bytes(source_sidecar.read_bytes() + b"external-change")
+
+    changed_bytes = source_sidecar.read_bytes() + b"external-change"
+    with pytest.raises(ProjectMigrationError) as caught:
+        ProjectMigrationService(files=ChangingFiles()).migrate(schema1_project)
+
+    assert caught.value.code == "project.migration_source_changed"
+    assert schema1_project.read_bytes() == original_db
+    assert source_sidecar.read_bytes() == changed_bytes
+    if sidecar == "-shm":
+        assert schema1_project.with_name(f"{schema1_project.name}-wal").read_bytes() == original_wal
+
+
+def test_sidecar_change_during_snapshot_blocks_migration(schema1_project):
+    _leave_pending_wal(schema1_project)
+    shm = schema1_project.with_name(f"{schema1_project.name}-shm")
+    original_db = schema1_project.read_bytes()
+    original_wal = schema1_project.with_name(f"{schema1_project.name}-wal").read_bytes()
+
+    class ChangingSnapshotService(ProjectMigrationService):
+        @staticmethod
+        def _snapshot_source(source, destination):
+            ProjectMigrationService._snapshot_source(source, destination)
+            shm.write_bytes(shm.read_bytes() + b"external-change")
+
+    changed_shm = shm.read_bytes() + b"external-change"
+    with pytest.raises(ProjectMigrationError) as caught:
+        ChangingSnapshotService().migrate(schema1_project)
+
+    assert caught.value.code == "project.migration_source_changed"
+    assert schema1_project.read_bytes() == original_db
+    assert schema1_project.with_name(f"{schema1_project.name}-wal").read_bytes() == original_wal
+    assert shm.read_bytes() == changed_shm
+
+
+def test_locked_sidecar_publication_restores_source_without_temp_leaks(schema1_project):
+    _leave_pending_wal(schema1_project)
+    paths = [schema1_project, Path(f"{schema1_project}-wal"), Path(f"{schema1_project}-shm")]
+    before = {path: path.read_bytes() for path in paths}
+
+    class LockedSidecarFiles(ProjectMigrationFiles):
+        def replace(self, source, destination):
+            if source.name.endswith("-shm"):
+                raise PermissionError("sidecar locked")
+            return super().replace(source, destination)
+
+    with pytest.raises(ProjectMigrationError) as caught:
+        ProjectMigrationService(files=LockedSidecarFiles()).migrate(schema1_project)
+
+    assert caught.value.code == "project.migration_failed"
+    assert {path: path.read_bytes() for path in paths} == before
+    assert not list(schema1_project.parent.glob(".source.certproject.*.tmp"))
+
+
+def test_snapshot_cleanup_failure_never_reports_failed_migration_after_publication(
+    schema1_project, monkeypatch
+):
+    _leave_pending_wal(schema1_project)
+    paths = [schema1_project, Path(f"{schema1_project}-wal"), Path(f"{schema1_project}-shm")]
+    before = {path: path.read_bytes() for path in paths}
+    snapshot = None
+    original_unlink = Path.unlink
+
+    class CleanupFailService(ProjectMigrationService):
+        @staticmethod
+        def _temporary(path):
+            nonlocal snapshot
+            temporary = ProjectMigrationService._temporary(path)
+            if snapshot is None:
+                snapshot = temporary
+            return temporary
+
+    def fail_snapshot_cleanup(path, *args, **kwargs):
+        if path == snapshot:
+            raise OSError("snapshot locked")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_snapshot_cleanup)
+    with pytest.raises(ProjectMigrationError) as caught:
+        CleanupFailService().migrate(schema1_project)
+
+    assert caught.value.code == "project.migration_failed"
+    assert {path: path.read_bytes() for path in paths} == before
 
 
 def test_hash_valid_malformed_revision_has_stable_error(schema1_project):

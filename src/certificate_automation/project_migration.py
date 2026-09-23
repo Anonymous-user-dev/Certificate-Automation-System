@@ -56,8 +56,14 @@ class ProjectMigrationService:
         backup_temp: Path | None = None
         migrated_temp: Path | None = None
         try:
+            source_state = self._source_fingerprint(path)
             source_snapshot = self._temporary(path)
             self._snapshot_source(path, source_snapshot)
+            self._assert_source_unchanged(path, source_state)
+            if self._file_digest(source_snapshot) != source_state[0] or (
+                self._file_digest(Path(f"{source_snapshot}-wal")) != source_state[1]
+            ):
+                raise ProjectMigrationError("project.migration_source_changed")
             self._validate(source_snapshot, version=1)
             backup_temp = self._temporary(path)
             self._files.copy_database(source_snapshot, backup_temp)
@@ -69,7 +75,9 @@ class ProjectMigrationService:
             self._files.copy_database(backup_path, migrated_temp)
             self._rewrite_schema(migrated_temp)
             self._validate(migrated_temp, version=2, code="project.migration_invalid_staging")
-            self._files.replace(migrated_temp, path)
+            self._remove_temporary(source_snapshot)
+            source_snapshot = None
+            self._publish(migrated_temp, path, source_state)
             migrated_temp = None
             return MigrationResult(path, backup_path, 1, 2)
         except ProjectMigrationError:
@@ -80,7 +88,10 @@ class ProjectMigrationService:
             for temporary in (source_snapshot, backup_temp, migrated_temp):
                 if temporary is not None:
                     for suffix in ("", "-wal", "-shm"):
-                        Path(f"{temporary}{suffix}").unlink(missing_ok=True)
+                        try:
+                            Path(f"{temporary}{suffix}").unlink(missing_ok=True)
+                        except OSError:
+                            pass
 
     @staticmethod
     def _temporary(path: Path) -> Path:
@@ -94,6 +105,79 @@ class ProjectMigrationService:
         source_wal = Path(f"{source}-wal")
         if source_wal.is_file():
             shutil.copyfile(source_wal, Path(f"{destination}-wal"))
+
+    @staticmethod
+    def _remove_temporary(path: Path) -> None:
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+    @staticmethod
+    def _file_digest(path: Path) -> str | None:
+        try:
+            with path.open("rb") as source:
+                digest = sha256()
+                for block in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(block)
+                return digest.hexdigest()
+        except FileNotFoundError:
+            return None
+
+    @classmethod
+    def _source_fingerprint(cls, path: Path) -> tuple[str | None, str | None, str | None]:
+        return tuple(cls._file_digest(Path(f"{path}{suffix}")) for suffix in ("", "-wal", "-shm"))
+
+    @classmethod
+    def _assert_source_unchanged(
+        cls, path: Path, expected: tuple[str | None, str | None, str | None]
+    ) -> None:
+        if cls._source_fingerprint(path) != expected:
+            raise ProjectMigrationError("project.migration_source_changed")
+
+    def _publish(
+        self, migrated: Path, path: Path,
+        expected: tuple[str | None, str | None, str | None],
+    ) -> None:
+        self._assert_source_unchanged(path, expected)
+        quarantined: list[tuple[Path, Path, str]] = []
+        moved: list[tuple[Path, Path, str]] = []
+        published = False
+        restored = False
+        try:
+            for suffix, digest in zip(("-wal", "-shm"), expected[1:], strict=True):
+                if digest is None:
+                    continue
+                sidecar = Path(f"{path}{suffix}")
+                stash = self._temporary(path)
+                quarantined.append((sidecar, stash, digest))
+                self._files.replace(sidecar, stash)
+                moved.append((sidecar, stash, digest))
+            if self._file_digest(path) != expected[0] or any(
+                self._file_digest(Path(f"{path}{suffix}")) is not None
+                for suffix in ("-wal", "-shm")
+            ) or any(
+                self._file_digest(stash) != digest
+                for _, stash, digest in moved
+            ):
+                raise ProjectMigrationError("project.migration_source_changed")
+            self._files.replace(migrated, path)
+            published = True
+        except Exception:
+            for sidecar, stash, _ in reversed(moved):
+                if sidecar.exists():
+                    raise ProjectMigrationError("project.migration_rollback_failed")
+                try:
+                    os.replace(stash, sidecar)
+                except OSError as error:
+                    raise ProjectMigrationError("project.migration_rollback_failed") from error
+            restored = True
+            raise
+        finally:
+            if published or restored or not moved:
+                for _, stash, _ in quarantined:
+                    try:
+                        stash.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
     @staticmethod
     def _validate(
