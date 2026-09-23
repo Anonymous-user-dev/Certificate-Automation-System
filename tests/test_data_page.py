@@ -158,3 +158,22 @@ def test_recipient_source_help_explains_paste_in_plain_language(qtbot):
     assert "copy" in help_text
     assert "heading" in help_text
     assert "excel" in help_text
+
+
+def test_invalid_rename_message_can_be_activated_without_exception(
+    qtbot, monkeypatch
+):
+    page = DataPage(CatalogSet.load(package_root(), "en"))
+    qtbot.addWidget(page)
+    page.set_dataset(_dataset())
+    page.table.setCurrentIndex(page.model.index(0, 1))
+    monkeypatch.setattr(
+        "PySide6.QtWidgets.QInputDialog.getText",
+        lambda *_args, **_kwargs: ("", True),
+    )
+    page.rename_column_button.click()
+    message = page.issue_list.item(0)
+
+    page._issue_item_activated(message)
+
+    assert page.model.dataset.columns[1].label == "Award"

@@ -251,5 +251,8 @@
   "workspace.saved": "Все изменения сохранены",
   "workspace.step_placeholder": "Этот шаг станет доступен после заполнения обязательных данных на предыдущих шагах.",
   "workspace.unsaved": "Сохранение изменений…",
-  "workspace.untitled": "Безымянный черновик"
+  "workspace.untitled": "Безымянный черновик",
+  "word.component_missing": "Компонент автоматизации Microsoft Word не установлен.",
+  "word.not_available": "Настольная версия Microsoft Word не установлена или её регистрация автоматизации повреждена.",
+  "word.windows_required": "Для создания PDF требуется настольная версия Microsoft Word для Windows."
 }

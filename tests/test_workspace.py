@@ -120,13 +120,21 @@ def test_output_defaults_to_word_and_individual_pdf_with_plain_count_summary(wor
 def test_unavailable_word_clears_pdf_choices_and_explains_why(workspace):
     page = workspace.output_page
     page.combined_pdf.setChecked(True)
+    workspace.set_locale("ru")
 
-    page.set_word_availability(WordAvailability(False, "Microsoft Word was not found"))
+    page.set_word_availability(
+        WordAvailability(
+            False,
+            "Desktop Microsoft Word is not installed or damaged.",
+            "word.not_available",
+        )
+    )
 
     assert not page.individual_pdf.isChecked()
     assert not page.combined_pdf.isChecked()
     assert not page.individual_pdf.isEnabled()
-    assert "Microsoft Word was not found" in page.word_status.text()
+    assert "настольная версия microsoft word" in page.word_status.text().casefold()
+    assert "not installed or damaged" not in page.word_status.text()
 
 
 def test_results_enable_combined_action_only_for_exact_combined_artifact(

@@ -251,5 +251,8 @@
   "workspace.saved": "All changes saved",
   "workspace.step_placeholder": "This guided step will become available after the required earlier information is complete.",
   "workspace.unsaved": "Saving changes…",
-  "workspace.untitled": "Untitled draft"
+  "workspace.untitled": "Untitled draft",
+  "word.component_missing": "The Microsoft Word automation component is not installed.",
+  "word.not_available": "Desktop Microsoft Word is not installed or its automation registration is damaged.",
+  "word.windows_required": "PDF creation requires the Windows desktop version of Microsoft Word."
 }

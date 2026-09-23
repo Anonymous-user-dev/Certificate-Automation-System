@@ -251,5 +251,8 @@
   "workspace.saved": "所有更改均已保存",
   "workspace.step_placeholder": "完成前面的必需信息后，此引导步骤将可用。",
   "workspace.unsaved": "正在保存更改…",
-  "workspace.untitled": "未命名草稿"
+  "workspace.untitled": "未命名草稿",
+  "word.component_missing": "未安装 Microsoft Word 自动化组件。",
+  "word.not_available": "未安装桌面版 Microsoft Word，或其自动化注册已损坏。",
+  "word.windows_required": "创建 PDF 需要 Windows 桌面版 Microsoft Word。"
 }

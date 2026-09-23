@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from certificate_automation.i18n import CatalogSet
+from certificate_automation.i18n import CatalogError, CatalogSet
 from certificate_automation.output_options import OutputOptions
 from certificate_automation.word import WordAvailability
 
@@ -129,10 +129,15 @@ class OutputPage(QWidget):
         elif availability.available:
             self.word_status.setText(self._catalogs.text("output.word_available"))
         else:
+            try:
+                reason = self._catalogs.text(availability.code)
+            except CatalogError:
+                reason = availability.message
+            reason = reason.rstrip().rstrip(".。")
             self.word_status.setText(
                 self._catalogs.text(
                     "output.word_unavailable",
-                    reason=availability.message,
+                    reason=reason,
                 )
             )
 

@@ -328,7 +328,10 @@ class DataPage(QWidget):
             self.issue_list.addItem(self._catalogs.text(str(code)))
 
     def _issue_item_activated(self, item: QListWidgetItem) -> None:
-        row_id, column_id = item.data(Qt.ItemDataRole.UserRole)
+        location = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(location, (tuple, list)) or len(location) != 2:
+            return
+        row_id, column_id = location
         if row_id and column_id:
             self.focus_cell(row_id, column_id)
             self.model.activate_issue(row_id, column_id)
