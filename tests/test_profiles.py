@@ -52,6 +52,15 @@ def test_profile_rejects_path_outside_store(tmp_path):
         ProfileStore(tmp_path / "profiles").load(tmp_path / "other.certprofile")
 
 
+def test_profile_rejects_outside_symlink_pointing_into_store(tmp_path):
+    store = ProfileStore(tmp_path / "profiles")
+    inside = store.save(MappingProfile.from_plan("Inside", MappingPlan({"N": ColumnValue("name")}), ("N",), (Column("name", "Name"),)))
+    outside = tmp_path / "shortcut.certprofile"
+    outside.symlink_to(inside)
+    with pytest.raises(ProfileError, match="profile.path_outside_store"):
+        store.load(outside)
+
+
 def test_changed_profile_hash_is_rejected_before_mapping(tmp_path):
     store = ProfileStore(tmp_path)
     saved = store.save(MappingProfile.from_plan("Awards", MappingPlan({"NAME": ColumnValue("name")}), ("NAME",), (Column("name", "Name"),)))

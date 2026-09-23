@@ -246,7 +246,12 @@ class ProfileStore:
 
     def load(self, path: Path) -> MappingProfile:
         path = Path(path)
-        if path.resolve().parent != self.directory.resolve() or path.suffix.lower() != ".certprofile":
+        if (
+            path.absolute().parent != self.directory.absolute()
+            or path.resolve().parent != self.directory.resolve()
+            or path.is_symlink()
+            or path.suffix.lower() != ".certprofile"
+        ):
             raise ProfileError("profile.path_outside_store")
         try:
             if path.stat().st_size > 1024 * 1024:

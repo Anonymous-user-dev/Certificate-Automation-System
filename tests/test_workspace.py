@@ -434,7 +434,8 @@ def test_applying_profile_persists_reference_and_invalidates_review_facts(
         "Awards", MappingPlan({"FULL_NAME": ColumnValue("column-1")}),
         ("FULL_NAME",), workspace.project_state.dataset.columns,
     )
-    profile_path = ProfileStore(tmp_path / "profiles").save(profile)
+    workspace.profile_store = ProfileStore(tmp_path / "profiles")
+    profile_path = workspace.profile_store.save(profile)
 
     workspace._apply_profile_path(profile_path)
     assert workspace.match_page.cards["FULL_NAME"].mapping_source() == ColumnValue("column-1")
@@ -473,7 +474,8 @@ def test_profile_applies_output_defaults_without_recipient_order_or_destination(
         ("FULL_NAME",), workspace.project_state.dataset.columns,
         defaults={"docx": False, "individual_pdf": True, "combined_pdf": True, "batch_name": "Awards"},
     )
-    profile_path = ProfileStore(tmp_path / "profiles").save(profile)
+    workspace.profile_store = ProfileStore(tmp_path / "profiles")
+    profile_path = workspace.profile_store.save(profile)
     workspace.output_page.destination.clear()
     workspace.output_page.batch_name.clear()
     workspace._apply_profile_path(profile_path)
@@ -483,6 +485,65 @@ def test_profile_applies_output_defaults_without_recipient_order_or_destination(
     assert workspace.output_page.batch_name.text() == "Awards"
     assert not workspace.output_page.destination.text()
     assert "row_ids" not in profile_path.read_text(encoding="utf-8")
+
+
+def test_profile_outside_configured_folder_is_rejected_without_changing_batch(
+    workspace, tmp_path, docx_factory
+):
+    project_path = tmp_path / "Restricted.certproject"
+    template = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
+    original = _saved_with_downstream_state(workspace, project_path, template, tmp_path)
+    workspace.profile_store = ProfileStore(tmp_path / "trusted-profiles")
+    outside_profile = MappingProfile.from_plan(
+        "Outside", MappingPlan({"FULL_NAME": FixedValue("Wrong name")}),
+        ("FULL_NAME",), workspace.project_state.dataset.columns,
+    )
+    outside_path = ProfileStore(tmp_path / "outside").save(
+        outside_profile, allow_fixed_values=True
+    )
+    prior_plan = workspace.project_state.plan
+    prior_outputs = workspace.project_state.outputs
+    prior_step = workspace.current_step
+    prior_completed = workspace.state.completed_steps
+
+    workspace._apply_profile_path(outside_path)
+
+    assert workspace.banner.issue_code == "profile.path_outside_store"
+    assert workspace.current_step == prior_step
+    assert workspace.state.completed_steps == prior_completed
+    assert workspace.project_state.plan == prior_plan
+    assert workspace.project_state.outputs == prior_outputs
+    assert workspace.project_state.warning_ack_revision == original.dataset.revision
+    assert workspace.match_page.cards["FULL_NAME"].mapping_source() == ColumnValue("column-1")
+    assert workspace.coordinator.flush()
+    saved = ProjectStore.open(project_path).load()
+    assert saved.profile_path == original.profile_path
+    assert saved.mapping_plan == original.mapping_plan
+    assert saved.approval == original.approval
+    assert saved.preview_revision == original.preview_revision
+    assert saved.acknowledgements == original.acknowledgements
+    assert saved.output_options == original.output_options
+
+
+def test_profile_from_different_template_warns_but_exact_fields_still_apply(
+    workspace, tmp_path, docx_factory
+):
+    project_path = tmp_path / "Template changed.certproject"
+    template = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
+    _saved_with_downstream_state(workspace, project_path, template, tmp_path)
+    workspace.profile_store = ProfileStore(tmp_path / "profiles")
+    profile = MappingProfile.from_plan(
+        "Older", MappingPlan({"FULL_NAME": ColumnValue("column-1")}),
+        ("FULL_NAME",), workspace.project_state.dataset.columns,
+        template_sha256="a" * 64,
+    )
+    profile_path = workspace.profile_store.save(profile)
+
+    workspace._apply_profile_path(profile_path)
+
+    assert workspace.banner.issue_code == "profile.template_changed"
+    assert workspace.match_page.cards["FULL_NAME"].mapping_source() == ColumnValue("column-1")
+    assert workspace.match_page.comparison_table.rowCount() == 1
 
 
 def test_saving_profile_with_fixed_text_requires_explicit_ui_confirmation(

@@ -1188,7 +1188,7 @@ class WorkspaceWindow(QMainWindow):
         if self._read_only or self.project_state.dataset is None or self.project_state.template is None:
             return
         try:
-            profile = ProfileStore(Path(path).parent).load(Path(path))
+            profile = self.profile_store.load(Path(path))
             comparison = compare_profile(
                 profile, self.project_state.dataset.columns, self.project_state.template.names
             )
