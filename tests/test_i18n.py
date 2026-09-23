@@ -138,6 +138,19 @@ def test_project_failures_have_complete_offline_translations(key):
         assert CatalogSet.load(PACKAGE_ROOT, locale).text(key)
 
 
+@pytest.mark.parametrize("locale", ("en", "zh_CN", "ru"))
+def test_project_home_save_and_example_messages_are_localized(locale):
+    catalog = CatalogSet.load(PACKAGE_ROOT, locale)
+    for key in (
+        "home.new_project", "home.open_project", "home.recent_projects",
+        "home.recover_project", "home.try_example", "project.health.missing",
+        "save_state.saved", "save_state.saving", "save_state.failed",
+        "save_state.read_only", "example.destination_not_empty", "close.save_failed",
+    ):
+        assert catalog.text(key) != key
+    assert "Awards" in catalog.text("migration.completed", backup="Awards")
+
+
 @pytest.mark.parametrize(
     ("key", "parameters"),
     [

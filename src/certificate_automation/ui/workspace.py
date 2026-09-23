@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from enum import Enum
+import os
 from pathlib import Path
 from typing import Mapping
 
-from PySide6.QtCore import QSettings, QThread, QTimer, Signal
+from PySide6.QtCore import QSettings, QStandardPaths, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
@@ -30,10 +32,14 @@ from PySide6.QtWidgets import (
 
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
 from certificate_automation.batch import BatchRequest, CancellationToken
-from certificate_automation.i18n import CatalogSet, SUPPORTED_LOCALES, package_root
+from certificate_automation.i18n import CatalogError, CatalogSet, SUPPORTED_LOCALES, package_root
 from certificate_automation.mapping import MappingPlan
 from certificate_automation.output_options import OutputOptions
 from certificate_automation.project import ProjectStore
+from certificate_automation.project import ProjectCoordinator, ProjectSaveError, ProjectState
+from certificate_automation.project_catalog import ProjectCatalog
+from certificate_automation.project_migration import ProjectMigrationService
+from certificate_automation.ui.project_home_page import ProjectHomePage
 from certificate_automation.ui.data_page import DataPage, ImportPreviewDialog
 from certificate_automation.ui.match_page import MatchPage
 from certificate_automation.ui.output_page import OutputPage
@@ -72,63 +78,11 @@ class OperatorProjectState:
     warning_ack_revision: int | None = None
 
 
-class HomePage(QWidget):
-    new_batch_requested = Signal()
-    continue_draft_requested = Signal()
-    recover_requested = Signal()
-    open_results_requested = Signal()
-
-    def __init__(self, catalogs: CatalogSet, parent=None) -> None:
-        super().__init__(parent)
-        self._catalogs = catalogs
-        self.title = QLabel()
-        self.title.setProperty("role", "title")
-        self.subtitle = QLabel()
-        self.subtitle.setProperty("role", "muted")
-        self.subtitle.setWordWrap(True)
-        self.new_batch_button = QPushButton()
-        self.new_batch_button.setProperty("role", "primary")
-        self.continue_draft_button = QPushButton()
-        self.recover_button = QPushButton()
-        self.open_results_button = QPushButton()
-        card = QFrame()
-        card.setProperty("role", "surface")
-        card_layout = QVBoxLayout(card)
-        for button in (
-            self.new_batch_button,
-            self.continue_draft_button,
-            self.recover_button,
-            self.open_results_button,
-        ):
-            card_layout.addWidget(button)
-        card_layout.addStretch(1)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(64, 56, 64, 56)
-        layout.addStretch(1)
-        layout.addWidget(self.title)
-        layout.addWidget(self.subtitle)
-        layout.addSpacing(24)
-        layout.addWidget(card)
-        layout.addStretch(2)
-        self.new_batch_button.clicked.connect(self.new_batch_requested)
-        self.continue_draft_button.clicked.connect(self.continue_draft_requested)
-        self.recover_button.clicked.connect(self.recover_requested)
-        self.open_results_button.clicked.connect(self.open_results_requested)
-        self.retranslate()
-
-    def retranslate(self) -> None:
-        self.title.setText(self._catalogs.text("home.title"))
-        self.subtitle.setText(self._catalogs.text("home.subtitle"))
-        controls = (
-            (self.new_batch_button, "home.new_batch"),
-            (self.continue_draft_button, "home.continue_draft"),
-            (self.recover_button, "home.recover"),
-            (self.open_results_button, "home.open_results"),
-        )
-        for control, key in controls:
-            text = self._catalogs.text(key)
-            control.setText(text)
-            control.setAccessibleName(text)
+class SaveState(str, Enum):
+    SAVED = "saved"
+    SAVING = "saving"
+    FAILED = "failed"
+    READ_ONLY = "read_only"
 
 
 class StepRail(QFrame):
@@ -243,8 +197,21 @@ class WorkspaceWindow(QMainWindow):
         self._worker = None
         self.cancellation: CancellationToken | None = None
         self._close_when_idle = False
+        self.coordinator: ProjectCoordinator | None = None
+        self._loaded_project: ProjectState | None = None
+        self._last_migration_backup: Path | None = None
+        self.save_state = SaveState.SAVED
+        catalog_dir = (
+            Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
+            if os.name == "nt" and self.settings.format() == QSettings.Format.NativeFormat
+            else Path(self.settings.fileName()).parent
+        )
+        self.project_catalog = getattr(services, "project_catalog", None) or ProjectCatalog(
+            catalog_dir / "recent-projects.json"
+        )
+        self.migration_service = getattr(services, "migration_service", None) or ProjectMigrationService()
 
-        self.home = HomePage(self.catalogs)
+        self.home = ProjectHomePage(self.catalogs)
         self.root_stack = QStackedWidget()
         self.root_stack.addWidget(self.home)
         self.workspace_surface = self._build_workspace()
@@ -254,10 +221,12 @@ class WorkspaceWindow(QMainWindow):
         self.setMinimumSize(620, 520)
         self.setStyleSheet(application_stylesheet())
 
-        self.home.new_batch_requested.connect(self.new_project)
-        self.home.continue_draft_requested.connect(self._continue_draft)
+        self.home.new_requested.connect(self._create_project_from_home)
+        self.home.open_requested.connect(self._open_project_dialog)
         self.home.recover_requested.connect(self._recover_draft)
-        self.home.open_results_requested.connect(self._open_results)
+        self.home.example_requested.connect(self._try_example)
+        self.home.project_requested.connect(self._open_recent_project)
+        self.home.repair_requested.connect(self._repair_recent_project)
         self.step_rail.step_requested.connect(self.navigate)
         self.back_button.clicked.connect(self._go_back)
         self.next_button.clicked.connect(self._go_next)
@@ -287,6 +256,7 @@ class WorkspaceWindow(QMainWindow):
         self.catalogs.subscribe(self._locale_changed)
         self.retranslate()
         self._ensure_accessible_names()
+        self._refresh_recent_projects()
         self._show_home()
 
     @property
@@ -365,7 +335,8 @@ class WorkspaceWindow(QMainWindow):
         outer.addWidget(bottom)
         return container
 
-    def new_project(self) -> None:
+    def new_project(self, path: Path | None = None) -> None:
+        self._flush_before_switch()
         dataset = TabularDataset(
             (Column("column-1", self.catalogs.text("data.default_column")),),
             (DataRow("row-1", None, {"column-1": ""}),),
@@ -377,17 +348,43 @@ class WorkspaceWindow(QMainWindow):
                 datetime.now(timezone.utc),
             ),
         )
+        store = None
+        project = None
+        if path is not None:
+            store = ProjectStore.create(Path(path))
+            project = ProjectState(revision=0, dataset=dataset, locale=self.catalogs.locale,
+                                   project_name=Path(path).stem)
+            store.save(project)
+        self.coordinator = None
+        self._loaded_project = project
+        self._last_migration_backup = None
+        self.statusBar().clearMessage()
         self.data_page.set_dataset(dataset)
-        self.state = WorkspaceState(current_step="data")
+        self.state = WorkspaceState(current_step="data", project_path=Path(path) if path else None)
         self.project_state = OperatorProjectState(dataset=dataset)
+        if store is not None:
+            self._attach_store(store)
+            self.project_catalog.remember(Path(path), project)
+            self._refresh_recent_projects()
+        self._set_save_state(SaveState.SAVED)
         self.banner.clear()
         self.root_stack.setCurrentWidget(self.workspace_surface)
         self._show_step("data")
 
-    def open_project(self, path: Path) -> None:
+    def load_project(self, path: Path) -> None:
+        self._flush_before_switch()
         opener = getattr(self.services, "open_project", None)
         store = opener(Path(path)) if callable(opener) else ProjectStore.open(Path(path))
+        migration_backup = None
+        if store.issue_code == "project.older_schema":
+            result = self.migration_service.migrate(Path(path))
+            store = opener(Path(path)) if callable(opener) else ProjectStore.open(Path(path))
+            migration_backup = result.backup_path
         project = store.load()
+        self.coordinator = None
+        self._last_migration_backup = migration_backup
+        self.statusBar().clearMessage()
+        self._loaded_project = project
         self.data_page.set_dataset(project.dataset)
         self.project_state = OperatorProjectState(dataset=project.dataset)
         self.state = WorkspaceState(
@@ -399,13 +396,83 @@ class WorkspaceWindow(QMainWindow):
             project_revision=project.revision,
         )
         self._remember_project(Path(path))
+        self.project_catalog.remember(Path(path), project)
+        self._refresh_recent_projects()
+        self._attach_store(store)
+        self._set_save_state(SaveState.READ_ONLY if store.read_only else SaveState.SAVED)
         self.set_locale(project.locale)
         self.root_stack.setCurrentWidget(self.workspace_surface)
         self._show_step(self.state.current_step)
+        self._update_migration_status()
+
+    def open_project(self, path: Path) -> None:
+        self.load_project(path)
+
+    def _flush_before_switch(self) -> None:
+        if self.coordinator is not None and not self.coordinator.flush():
+            raise ProjectSaveError("project.save_failed")
+
+    def _attach_store(self, store: ProjectStore) -> None:
+        if store.read_only:
+            self.coordinator = None
+            return
+        coordinator = ProjectCoordinator(store, self)
+        coordinator.saved.connect(self._project_saved)
+        coordinator.save_failed.connect(self._project_save_failed)
+        self.coordinator = coordinator
+
+    def _set_save_state(self, state: SaveState) -> None:
+        self.save_state = state
+        label = self.catalogs.text(f"save_state.{state.value}")
+        self.save_state_label.setText(label)
+        self.save_state_label.setAccessibleName(label)
+        self.home.save_state_label.setText(label)
+        self.home.save_state_label.setAccessibleName(label)
+
+    def _project_saved(self, _revision: int) -> None:
+        self._set_save_state(SaveState.SAVED)
+        if self.state.project_path is not None and self._loaded_project is not None:
+            self.project_catalog.remember(self.state.project_path, self._loaded_project)
+            self._refresh_recent_projects()
+
+    def _project_save_failed(self, _error: Exception) -> None:
+        self._set_save_state(SaveState.FAILED)
+
+    def _mark_project_dirty(self) -> None:
+        if self.coordinator is None or self._loaded_project is None:
+            return
+        current = self.project_state
+        template = current.template
+        self._loaded_project = replace(
+            self._loaded_project,
+            revision=self.state.project_revision,
+            dataset=current.dataset,
+            template_path=template.path if template is not None else self._loaded_project.template_path,
+            template_sha256=template.sha256 if template is not None else self._loaded_project.template_sha256,
+            mapping_plan=current.plan.to_json() if current.plan is not None else None,
+            output_options=current.outputs.to_json() if current.outputs is not None else None,
+            locale=self.catalogs.locale,
+            active_step=self.current_step,
+        )
+        self.coordinator.mark_dirty(self._loaded_project)
+        self._set_save_state(SaveState.SAVING)
 
     def set_locale(self, locale: str) -> None:
         self.catalogs.set_locale(locale)
         self.settings.setValue("locale", self.catalogs.locale)
+        if (
+            self.coordinator is not None
+            and self._loaded_project is not None
+            and self._loaded_project.locale != self.catalogs.locale
+        ):
+            self.state = replace(self.state, project_revision=self.state.project_revision + 1)
+            self._loaded_project = replace(
+                self._loaded_project,
+                revision=self.state.project_revision,
+                locale=self.catalogs.locale,
+            )
+            self.coordinator.mark_dirty(self._loaded_project)
+            self._set_save_state(SaveState.SAVING)
         index = self.locale_selector.findData(self.catalogs.locale)
         if index >= 0 and index != self.locale_selector.currentIndex():
             self.locale_selector.blockSignals(True)
@@ -453,7 +520,7 @@ class WorkspaceWindow(QMainWindow):
         self.home.retranslate()
         self.product_label.setText(self.catalogs.text("app.title"))
         self.draft_label.setText(self.catalogs.text("workspace.untitled"))
-        self.save_state_label.setText(self.catalogs.text("workspace.saved"))
+        self._set_save_state(self.save_state)
         self.locale_label.setText(self.catalogs.text("workspace.language"))
         self.locale_selector.setAccessibleName(self.catalogs.text("workspace.language"))
         self.back_button.setText(self.catalogs.text("action.back"))
@@ -467,6 +534,13 @@ class WorkspaceWindow(QMainWindow):
                 self.catalogs.text(self.banner.issue_code),
             )
         self._ensure_accessible_names()
+        self._update_migration_status()
+
+    def _update_migration_status(self) -> None:
+        if self._last_migration_backup is not None:
+            message = self.catalogs.text("migration.completed", backup=str(self._last_migration_backup))
+            self.statusBar().showMessage(message)
+            self.statusBar().setAccessibleName(message)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -671,7 +745,7 @@ class WorkspaceWindow(QMainWindow):
             completed_steps=completed,
             project_revision=self.state.project_revision + 1,
         )
-        self.save_state_label.setText(self.catalogs.text("workspace.unsaved"))
+        self._mark_project_dirty()
 
     def _select_template(self, path: Path) -> None:
         try:
@@ -695,6 +769,8 @@ class WorkspaceWindow(QMainWindow):
             self.project_state.dataset,
             inspection.names,
         )
+        self.state = replace(self.state, project_revision=self.state.project_revision + 1)
+        self._mark_project_dirty()
         self.mark_step_complete("template")
         self.navigate("mapping")
 
@@ -706,6 +782,8 @@ class WorkspaceWindow(QMainWindow):
             warning_ack_revision=None,
         )
         self.review_page.set_context(self.project_state.dataset, plan)
+        self.state = replace(self.state, project_revision=self.state.project_revision + 1)
+        self._mark_project_dirty()
         self.mark_step_complete("mapping")
         self.navigate("review")
 
@@ -719,6 +797,8 @@ class WorkspaceWindow(QMainWindow):
 
     def _accept_outputs(self, outputs: OutputOptions) -> None:
         self.project_state = replace(self.project_state, outputs=outputs)
+        self.state = replace(self.state, project_revision=self.state.project_revision + 1)
+        self._mark_project_dirty()
         self.mark_step_complete("output")
         self.navigate("generate")
 
@@ -872,6 +952,29 @@ class WorkspaceWindow(QMainWindow):
             self._request_cancel()
             event.ignore()
             return
+        if self.coordinator is not None and self.coordinator.has_pending:
+            while not self.coordinator.flush():
+                dialog = QMessageBox(self)
+                dialog.setIcon(QMessageBox.Icon.Warning)
+                dialog.setWindowTitle(self.catalogs.text("app.title"))
+                dialog.setText(self.catalogs.text("close.save_failed"))
+                retry_button = dialog.addButton(
+                    self.catalogs.text("close.retry"), QMessageBox.ButtonRole.AcceptRole
+                )
+                discard_button = dialog.addButton(
+                    self.catalogs.text("close.discard"), QMessageBox.ButtonRole.DestructiveRole
+                )
+                dialog.setStandardButtons(QMessageBox.StandardButton.Cancel)
+                dialog.button(QMessageBox.StandardButton.Cancel).setText(
+                    self.catalogs.text("close.cancel")
+                )
+                dialog.exec()
+                if dialog.clickedButton() is retry_button:
+                    continue
+                if dialog.clickedButton() is not discard_button:
+                    event.ignore()
+                    return
+                break
         preview_service = getattr(self.services, "preview_service", None)
         if preview_service is not None:
             self.review_page.clear_preview()
@@ -918,17 +1021,92 @@ class WorkspaceWindow(QMainWindow):
             self.catalogs.text("file.project_filter"),
         )
         if selected:
-            self.open_project(Path(selected))
+            self._open_recent_project(Path(selected))
 
     def _recover_draft(self) -> None:
         selected, _filter = QFileDialog.getOpenFileName(
             self,
-            self.catalogs.text("home.recover"),
+            self.catalogs.text("home.recover_project"),
             "",
             self.catalogs.text("file.backup_filter"),
         )
         if selected:
-            self.open_project(Path(selected))
+            self._open_recent_project(Path(selected))
+
+    def _refresh_recent_projects(self) -> None:
+        self.home.set_projects(self.project_catalog.list())
+
+    def _create_project_from_home(self) -> None:
+        selected, _filter = QFileDialog.getSaveFileName(
+            self, self.catalogs.text("home.new_project"), "",
+            self.catalogs.text("file.project_filter"),
+        )
+        if not selected:
+            return
+        path = Path(selected)
+        if path.suffix != ".certproject":
+            path = path.with_suffix(".certproject")
+        try:
+            self.new_project(path)
+        except Exception as error:
+            self._show_project_error(error)
+
+    def _open_project_dialog(self) -> None:
+        selected, _filter = QFileDialog.getOpenFileName(
+            self, self.catalogs.text("home.choose_project"), "",
+            self.catalogs.text("file.project_filter"),
+        )
+        if selected:
+            self._open_recent_project(Path(selected))
+
+    def _open_recent_project(self, path: Path) -> None:
+        try:
+            self.load_project(path)
+        except Exception as error:
+            self._show_project_error(error)
+
+    def _repair_recent_project(self, missing_path: Path) -> None:
+        selected, _filter = QFileDialog.getOpenFileName(
+            self, self.catalogs.text("home.repair"), "",
+            self.catalogs.text("file.project_filter"),
+        )
+        if selected:
+            try:
+                self.load_project(Path(selected))
+            except Exception as error:
+                self._show_project_error(error)
+                return
+            self.project_catalog.forget(missing_path)
+            self._refresh_recent_projects()
+
+    def _try_example(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self, self.catalogs.text("example.choose_destination")
+        )
+        if not selected:
+            return
+        try:
+            creator = getattr(self.services, "create_example", None)
+            if callable(creator):
+                path = creator(Path(selected))
+            else:
+                from certificate_automation.app import create_example_project
+                path = create_example_project(package_root().parent.parent / "examples", Path(selected))
+            self.load_project(path)
+        except Exception as error:
+            self._show_project_error(error)
+            return
+        QMessageBox.information(
+            self, self.catalogs.text("app.title"), self.catalogs.text("example.copied")
+        )
+
+    def _show_project_error(self, error: Exception) -> None:
+        code = getattr(error, "code", "migration.open_failed")
+        try:
+            message = self.catalogs.text(code)
+        except CatalogError:
+            message = self.catalogs.text("migration.failed")
+        QMessageBox.warning(self, self.catalogs.text("app.title"), message)
 
     def _open_results(self) -> None:
         selected = QFileDialog.getExistingDirectory(

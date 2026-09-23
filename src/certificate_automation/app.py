@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import os
+from hashlib import sha256
 import shutil
 import sys
 import tempfile
@@ -25,6 +26,7 @@ from certificate_automation.importers.clipboard import (
 from certificate_automation.importers.delimited import import_delimited, inspect_delimited
 from certificate_automation.importers.excel import import_excel, inspect_excel
 from certificate_automation.mapping import MappingSelection, suggest_mappings
+from certificate_automation.project import ProjectState, ProjectStore
 from certificate_automation.project import ProjectStore
 from certificate_automation.preview import PreviewService
 from certificate_automation.recovery import RecoveryService
@@ -73,6 +75,58 @@ class PreviewGenerator:
         return pdf_path
 
 
+class ExampleProjectError(RuntimeError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def create_example_project(example_root: Path, destination: Path) -> Path:
+    """Copy installed samples to an empty working folder and create a draft."""
+
+    example_root, destination = Path(example_root), Path(destination)
+    required = ("sample_recipients.csv", "sample_certificate_template.docx", "sample_students.xlsx")
+    if not example_root.is_dir() or any(
+        not (example_root / name).is_file() or (example_root / name).is_symlink()
+        for name in required
+    ):
+        raise ExampleProjectError("example.source_missing")
+    if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
+        raise ExampleProjectError("example.destination_not_empty")
+    if destination.resolve() == example_root.resolve() or example_root.resolve() in destination.resolve().parents:
+        raise ExampleProjectError("example.destination_not_empty")
+    stage: Path | None = None
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=destination.parent))
+        for name in required:
+            shutil.copy2(example_root / name, stage / name)
+        from certificate_automation.importers.delimited import import_delimited
+
+        dataset = import_delimited(stage / "sample_recipients.csv", "utf-8", ",")
+        dataset = replace(dataset, source=replace(
+            dataset.source, path=destination / "sample_recipients.csv"
+        ))
+        template = stage / "sample_certificate_template.docx"
+        project = destination / "Example.certproject"
+        ProjectStore.create(stage / project.name).save(ProjectState(
+            revision=0,
+            dataset=dataset,
+            template_path=destination / template.name,
+            template_sha256=sha256(template.read_bytes()).hexdigest(),
+            project_name="Example",
+        ))
+        if destination.exists():
+            destination.rmdir()
+        os.replace(stage, destination)
+    except Exception as error:
+        raise ExampleProjectError("example.copy_failed") from error
+    finally:
+        if stage is not None and stage.is_dir():
+            shutil.rmtree(stage)
+    return project
+
+
 @dataclass(frozen=True, slots=True)
 class ApplicationServices:
     list_worksheets: Callable[[Path], tuple[str, ...]]
@@ -100,6 +154,8 @@ class ApplicationServices:
     open_project: Callable[[Path], ProjectStore] | None = None
     word_availability: Callable | None = None
     preview_service: PreviewService | None = None
+    create_example: Callable[[Path], Path] | None = None
+    example_root: Path | None = None
 
 
 def create_default_services(locale: str = "en") -> ApplicationServices:
@@ -147,6 +203,10 @@ def create_default_services(locale: str = "en") -> ApplicationServices:
         open_project=ProjectStore.open,
         word_availability=converter.is_available,
         preview_service=PreviewService(converter),
+        create_example=lambda destination: create_example_project(
+            package_root().parent.parent / "examples", destination
+        ),
+        example_root=package_root().parent.parent / "examples",
     )
 
 

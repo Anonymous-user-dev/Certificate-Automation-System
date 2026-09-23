@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from contextlib import closing
+from hashlib import sha256
+import json
+import sqlite3
 
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QAbstractButton, QComboBox, QLineEdit, QTableView
@@ -9,6 +13,8 @@ import pytest
 from certificate_automation.i18n import CatalogSet, package_root
 from certificate_automation.domain import BatchResult, BatchState
 from certificate_automation.ui.workspace import WorkspaceWindow
+from certificate_automation.ui.workspace import SaveState
+from certificate_automation.project import ProjectCorruptError, ProjectSaveError, ProjectState, ProjectStore
 from certificate_automation.word import WordAvailability
 
 
@@ -24,10 +30,109 @@ def workspace(qtbot, tmp_path):
 
 
 def test_home_has_four_clear_primary_actions(workspace):
-    assert workspace.home.new_batch_button.isVisible()
-    assert workspace.home.continue_draft_button.isVisible()
-    assert workspace.home.recover_button.isVisible()
-    assert workspace.home.open_results_button.isVisible()
+    assert all(button.isVisible() for button in workspace.home.primary_buttons())
+
+
+def test_new_project_saves_real_edits_and_updates_status(workspace, qtbot, tmp_path):
+    path = tmp_path / "Awards.certproject"
+    workspace.new_project(path)
+    assert path.is_file()
+    assert workspace.save_state == SaveState.SAVED
+    assert workspace.save_state_label.text() == workspace.catalogs.text("save_state.saved")
+
+    index = workspace.data_page.model.index(0, 0)
+    assert workspace.data_page.model.setData(index, "Ada", Qt.ItemDataRole.EditRole)
+    assert workspace.save_state == SaveState.SAVING
+    qtbot.waitUntil(lambda: workspace.save_state == SaveState.SAVED, timeout=4000)
+
+    loaded = ProjectStore.open(path).load()
+    assert loaded.dataset.rows[0].value("column-1") == "Ada"
+    assert loaded.schema_version == 2
+
+
+def test_load_project_reopens_saved_data_and_recent_catalog(workspace, tmp_path):
+    path = tmp_path / "Awards.certproject"
+    workspace.new_project(path)
+    workspace.load_project(path)
+
+    assert workspace.state.project_path == path
+    assert workspace.save_state == SaveState.SAVED
+    assert any(summary.path == path for summary in workspace.home._projects)
+
+
+def test_switching_projects_flushes_pending_edit_before_opening_next(workspace, tmp_path):
+    first = tmp_path / "First.certproject"
+    second = tmp_path / "Second.certproject"
+    workspace.new_project(first)
+    ProjectStore.create(second).save(ProjectState(0, ProjectStore.open(first).load().dataset))
+    index = workspace.data_page.model.index(0, 0)
+    workspace.data_page.model.setData(index, "Ada", Qt.ItemDataRole.EditRole)
+
+    workspace.load_project(second)
+
+    assert ProjectStore.open(first).load().dataset.rows[0].value("column-1") == "Ada"
+    assert workspace.state.project_path == second
+    assert workspace.save_state == SaveState.SAVED
+
+
+def test_failed_open_keeps_current_project_editable_and_savable(workspace, tmp_path):
+    current = tmp_path / "Current.certproject"
+    workspace.new_project(current)
+
+    with pytest.raises(ProjectCorruptError):
+        workspace.load_project(tmp_path / "missing.certproject")
+
+    assert workspace.state.project_path == current
+    workspace.data_page.model.setData(workspace.data_page.model.index(0, 0), "Ada", Qt.ItemDataRole.EditRole)
+    assert workspace.coordinator.flush()
+    assert ProjectStore.open(current).load().dataset.rows[0].value("column-1") == "Ada"
+
+
+def test_failed_create_keeps_current_project_editable_and_savable(workspace, tmp_path):
+    current = tmp_path / "Current.certproject"
+    workspace.new_project(current)
+    occupied = tmp_path / "Occupied.certproject"
+    occupied.write_text("mine", encoding="utf-8")
+
+    with pytest.raises(ProjectSaveError):
+        workspace.new_project(occupied)
+
+    assert workspace.state.project_path == current
+    workspace.data_page.model.setData(workspace.data_page.model.index(0, 0), "Ada", Qt.ItemDataRole.EditRole)
+    assert workspace.coordinator.flush()
+    assert ProjectStore.open(current).load().dataset.rows[0].value("column-1") == "Ada"
+
+
+def test_locale_change_is_saved_in_project(workspace, tmp_path):
+    path = tmp_path / "Languages.certproject"
+    workspace.new_project(path)
+
+    workspace.set_locale("ru")
+    assert workspace.save_state == SaveState.SAVING
+    assert workspace.coordinator.flush()
+
+    assert ProjectStore.open(path).load().locale == "ru"
+
+
+def test_loading_older_project_migrates_and_shows_backup_location(workspace, tmp_path):
+    path = tmp_path / "Legacy.certproject"
+    workspace.new_project()
+    payload = ProjectState(0, workspace.project_state.dataset).to_payload()
+    for key in ("schema_version", "project_name", "profile_path", "approval", "published_revisions", "print_settings"):
+        payload.pop(key)
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        connection.execute("INSERT INTO metadata VALUES ('schema_version', '1')")
+        connection.execute("CREATE TABLE revisions (revision INTEGER PRIMARY KEY, saved_at TEXT NOT NULL, payload_json TEXT NOT NULL, payload_sha256 TEXT NOT NULL)")
+        connection.execute("INSERT INTO revisions VALUES (0, '2026-09-22T00:00:00+00:00', ?, ?)", (encoded, sha256(encoded.encode()).hexdigest()))
+
+    workspace.load_project(path)
+
+    backup = path.with_name(f"{path.name}.pre-v2-backup")
+    assert backup.is_file()
+    assert ProjectStore.open(path).load().schema_version == 2
+    assert backup.name in workspace.statusBar().currentMessage()
 
 
 def test_language_switch_retranslates_without_losing_edits(workspace):

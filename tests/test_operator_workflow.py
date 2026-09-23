@@ -14,7 +14,7 @@ from certificate_automation.domain import BatchState, Issue, Severity
 from certificate_automation.i18n import CatalogSet, package_root
 from certificate_automation.mapping import ColumnValue, FormattedDateValue, MappingPlan
 from certificate_automation.output_options import OutputOptions
-from certificate_automation.project import ProjectState
+from certificate_automation.project import ProjectState, ProjectStore
 from certificate_automation.template import inspect_template
 from certificate_automation.ui.workspace import WorkspaceWindow
 from certificate_automation.validation import ValidationReport, validate_preflight
@@ -420,35 +420,31 @@ def test_saved_project_and_home_file_actions_restore_local_workflow(
     qtbot, tmp_path, docx_factory, monkeypatch
 ):
     services = _services(tmp_path, docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
-    draft = tmp_path / "draft.certificate-project"
-    draft.write_text("placeholder", "utf-8")
+    draft = tmp_path / "draft.certproject"
     project = ProjectState(4, _dataset(), locale="ru", active_step="template")
-    services.open_project = lambda _path: SimpleNamespace(load=lambda: project)
-    opened = []
-    services.open_path = lambda path: opened.append(path) or True
+    ProjectStore.create(draft).save(project)
     settings = QSettings(str(tmp_path / "home.ini"), QSettings.Format.IniFormat)
     window = WorkspaceWindow(services, settings=settings)
     qtbot.addWidget(window)
-    window.open_project(draft)
+    window.show()
+    window.load_project(draft)
 
     assert window.current_step == "template"
     assert window.catalogs.locale == "ru"
-    settings.setValue("recent_projects", str(draft))
-    window._continue_draft()
+    window._show_home()
+    assert window.home.project_label(0).text().startswith(draft.name)
+    qtbot.mouseClick(window.home._project_widgets[0][2], Qt.MouseButton.LeftButton)
+    assert window.current_step == "template"
     monkeypatch.setattr(
         "certificate_automation.ui.workspace.QFileDialog.getOpenFileName",
         lambda *_args: (str(draft), ""),
     )
-    settings.setValue("recent_projects", [])
-    window._continue_draft()
+    window._show_home()
+    qtbot.mouseClick(window.home.open_project_button, Qt.MouseButton.LeftButton)
+    assert window.state.project_path == draft
+    window._show_home()
     window._recover_draft()
-    monkeypatch.setattr(
-        "certificate_automation.ui.workspace.QFileDialog.getExistingDirectory",
-        lambda *_args: str(tmp_path),
-    )
-    window._open_results()
-
-    assert opened == [tmp_path]
+    assert window.state.project_path == draft
 
 
 def test_navigation_and_generation_guards_explain_stale_or_invalid_state(

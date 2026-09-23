@@ -4,6 +4,8 @@ from pathlib import Path
 import time
 
 from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication, QMessageBox
 import pytest
 
 from certificate_automation.app import ApplicationServices
@@ -15,6 +17,10 @@ from certificate_automation.ui.main_window import LegacyMainWindow as MainWindow
 from certificate_automation.validation import ValidationReport
 from certificate_automation.word import Availability
 from certificate_automation.workbook import WorkbookData
+from certificate_automation.i18n import CatalogSet, package_root
+from certificate_automation.ui.workspace import SaveState, WorkspaceWindow
+from certificate_automation.project import ProjectStore
+from types import SimpleNamespace
 
 
 class CancellableGenerator:
@@ -75,6 +81,30 @@ def test_close_during_generation_requests_safe_cancel(qtbot, tmp_path):
     assert window.isVisible() is True
     qtbot.waitUntil(lambda: window.active_thread is None)
     qtbot.waitUntil(lambda: not window.isVisible())
+
+
+def test_failed_close_save_cancel_keeps_window_and_pending_revision(qtbot, tmp_path):
+    window = WorkspaceWindow(SimpleNamespace(catalogs=CatalogSet.load(package_root(), "en")))
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.waitExposed(window)
+    path = tmp_path / "Awards.certproject"
+    window.new_project(path)
+    path.unlink()
+    window.data_page.model.setData(window.data_page.model.index(0, 0), "Ada", Qt.ItemDataRole.EditRole)
+
+    def cancel_dialog():
+        dialog = next(widget for widget in QApplication.topLevelWidgets() if isinstance(widget, QMessageBox) and widget.isVisible())
+        dialog.button(QMessageBox.StandardButton.Cancel).click()
+
+    QTimer.singleShot(0, cancel_dialog)
+    window.close()
+
+    assert window.isVisible()
+    assert window.save_state == SaveState.FAILED
+    assert window.coordinator.has_pending
+    ProjectStore.create(path)
+    window.close()
 
 
 def test_recovery_finds_only_incomplete_batch_directories(tmp_path):
