@@ -9,13 +9,15 @@ import sqlite3
 from threading import Event
 
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtWidgets import QAbstractButton, QAbstractItemView, QComboBox, QLineEdit, QTableView
+from PySide6.QtWidgets import QAbstractButton, QAbstractItemView, QComboBox, QLineEdit, QMessageBox, QTableView
 import pytest
 
 from certificate_automation.i18n import CatalogSet, package_root
 from certificate_automation.dataset import Column, DataRow, TabularDataset
 from certificate_automation.domain import BatchResult, BatchState
 from certificate_automation.output_options import OutputOptions
+from certificate_automation.mapping import ColumnValue, FixedValue, MappingPlan
+from certificate_automation.profiles import MappingProfile, ProfileStore
 from certificate_automation.ui.workspace import WorkspaceWindow
 from certificate_automation.ui.workspace import SaveState
 from certificate_automation.project import ProjectCorruptError, ProjectError, ProjectSaveError, ProjectState, ProjectStore
@@ -420,6 +422,84 @@ def test_newer_schema_disables_restored_mapping_review_and_output_edits(
     assert not workspace.review_page.preview_button.isEnabled()
     assert not workspace.output_page.docx.isEnabled()
     assert not workspace.output_page.continue_button.isEnabled()
+
+
+def test_applying_profile_persists_reference_and_invalidates_review_facts(
+    workspace, tmp_path, docx_factory
+):
+    project_path = tmp_path / "Profile batch.certproject"
+    template = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
+    _saved_with_downstream_state(workspace, project_path, template, tmp_path)
+    profile = MappingProfile.from_plan(
+        "Awards", MappingPlan({"FULL_NAME": ColumnValue("column-1")}),
+        ("FULL_NAME",), workspace.project_state.dataset.columns,
+    )
+    profile_path = ProfileStore(tmp_path / "profiles").save(profile)
+
+    workspace._apply_profile_path(profile_path)
+    assert workspace.match_page.cards["FULL_NAME"].mapping_source() == ColumnValue("column-1")
+    assert workspace.match_page.comparison_table.rowCount() == 1
+    assert workspace.project_state.plan is None
+    assert workspace.project_state.outputs is None
+    assert workspace.project_state.warning_ack_revision is None
+    assert workspace.coordinator.flush()
+    saved = ProjectStore.open(project_path).load()
+    assert saved.profile_path == profile_path
+    assert saved.mapping_plan is None
+    assert saved.approval is None
+    assert saved.preview_revision is None
+    assert saved.acknowledgements == ()
+
+
+def test_read_only_project_disables_profile_mutations(workspace, tmp_path, docx_factory):
+    path = tmp_path / "Future profile.certproject"
+    template = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
+    _saved_with_downstream_state(workspace, path, template, tmp_path)
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("UPDATE metadata SET value='3' WHERE key='schema_version'")
+    workspace.load_project(path)
+    assert not workspace.match_page.save_profile_button.isEnabled()
+    assert not workspace.match_page.apply_profile_button.isEnabled()
+
+
+def test_profile_applies_output_defaults_without_recipient_order_or_destination(
+    workspace, tmp_path, docx_factory
+):
+    path = tmp_path / "Defaults.certproject"
+    template = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
+    _saved_with_downstream_state(workspace, path, template, tmp_path)
+    profile = MappingProfile.from_plan(
+        "Defaults", MappingPlan({"FULL_NAME": ColumnValue("column-1")}),
+        ("FULL_NAME",), workspace.project_state.dataset.columns,
+        defaults={"docx": False, "individual_pdf": True, "combined_pdf": True, "batch_name": "Awards"},
+    )
+    profile_path = ProfileStore(tmp_path / "profiles").save(profile)
+    workspace.output_page.destination.clear()
+    workspace.output_page.batch_name.clear()
+    workspace._apply_profile_path(profile_path)
+    assert not workspace.output_page.docx.isChecked()
+    assert workspace.output_page.individual_pdf.isChecked()
+    assert workspace.output_page.combined_pdf.isChecked()
+    assert workspace.output_page.batch_name.text() == "Awards"
+    assert not workspace.output_page.destination.text()
+    assert "row_ids" not in profile_path.read_text(encoding="utf-8")
+
+
+def test_saving_profile_with_fixed_text_requires_explicit_ui_confirmation(
+    workspace, tmp_path, docx_factory, monkeypatch
+):
+    path = tmp_path / "Private profile.certproject"
+    template = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
+    _saved_with_downstream_state(workspace, path, template, tmp_path)
+    workspace.profile_store = ProfileStore(tmp_path / "profiles")
+    workspace.match_page.cards["FULL_NAME"].set_mapping_source(FixedValue("Private text"))
+    monkeypatch.setattr("certificate_automation.ui.workspace.QInputDialog.getText", lambda *args: ("Private", True))
+    monkeypatch.setattr("certificate_automation.ui.workspace.QMessageBox.question", lambda *args: QMessageBox.StandardButton.No)
+    workspace.match_page.save_profile_button.click()
+    assert workspace.profile_store.list() == ()
+    monkeypatch.setattr("certificate_automation.ui.workspace.QMessageBox.question", lambda *args: QMessageBox.StandardButton.Yes)
+    workspace.match_page.save_profile_button.click()
+    assert len(workspace.profile_store.list()) == 1
 
 
 def test_data_edit_clears_downstream_approval_and_preview_but_preserves_independent_fields(

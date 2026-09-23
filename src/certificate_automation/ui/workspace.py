@@ -36,6 +36,7 @@ from certificate_automation.dataset import Column, DataRow, SourceSnapshot, Tabu
 from certificate_automation.batch import BatchRequest, CancellationToken
 from certificate_automation.i18n import CatalogError, CatalogSet, SUPPORTED_LOCALES, package_root
 from certificate_automation.mapping import MappingPlan, evaluate_plan
+from certificate_automation.profiles import MappingProfile, ProfileError, ProfileStore, compare_profile
 from certificate_automation.output_options import OutputOptions
 from certificate_automation.project import ProjectCoordinator, ProjectError, ProjectSaveError, ProjectState, ProjectStore
 from certificate_automation.project_catalog import ProjectCatalog
@@ -202,6 +203,7 @@ class WorkspaceWindow(QMainWindow):
         self.coordinator: ProjectCoordinator | None = None
         self._read_only = False
         self._hydrating_project = False
+        self._restoring_mapping = False
         self._loaded_project: ProjectState | None = None
         self._last_migration_backup: Path | None = None
         self.save_state = SaveState.SAVED
@@ -213,6 +215,7 @@ class WorkspaceWindow(QMainWindow):
         self.project_catalog = getattr(services, "project_catalog", None) or ProjectCatalog(
             catalog_dir / "recent-projects.json"
         )
+        self.profile_store = ProfileStore(catalog_dir / "profiles")
         self.migration_service = getattr(services, "migration_service", None) or ProjectMigrationService()
 
         self.home = ProjectHomePage(self.catalogs)
@@ -246,6 +249,9 @@ class WorkspaceWindow(QMainWindow):
         self.template_page.template_selected.connect(self._select_template)
         self.template_page.inspection_accepted.connect(self._accept_template)
         self.match_page.plan_accepted.connect(self._accept_plan)
+        self.match_page.plan_changed.connect(self._mapping_changed)
+        self.match_page.save_profile_requested.connect(self._save_profile)
+        self.match_page.apply_profile_requested.connect(self._choose_profile)
         self.review_page.review_accepted.connect(self._accept_review)
         self.review_page.issue_activated.connect(self._focus_issue)
         self.review_page.warnings_acknowledged.connect(self._acknowledge_warnings)
@@ -417,6 +423,7 @@ class WorkspaceWindow(QMainWindow):
         finally:
             self._hydrating_project = False
         self.project_state = restored
+        self._restoring_mapping = True
         self._reset_workflow_pages(project.dataset)
         if restored.template is not None:
             self.template_page.set_inspection(restored.template)
@@ -452,6 +459,7 @@ class WorkspaceWindow(QMainWindow):
         self._attach_store(store)
         self._set_save_state(SaveState.READ_ONLY if store.read_only else SaveState.SAVED)
         self._set_read_only_mode(store.read_only)
+        self._restoring_mapping = False
         self.set_locale(project.locale)
         self.banner.clear()
         if repair_code is not None:
@@ -618,6 +626,8 @@ class WorkspaceWindow(QMainWindow):
             for control in (
                 card.type_combo, card.column_combo, card.fixed_input,
                 card.join_columns, card.join_separator,
+                card.sequence_start, card.sequence_step, card.sequence_width,
+                card.sequence_prefix, card.sequence_suffix,
                 card.input_format, card.output_format,
             ):
                 control.setEnabled(not read_only)
@@ -625,6 +635,8 @@ class WorkspaceWindow(QMainWindow):
             self.match_page.continue_button.setEnabled(False)
         else:
             self.match_page._changed()
+        self.match_page.save_profile_button.setEnabled(not read_only)
+        self.match_page.apply_profile_button.setEnabled(not read_only)
         self.results_page.generate_button.setEnabled(
             not read_only and self.project_state.outputs is not None
         )
@@ -1090,6 +1102,124 @@ class WorkspaceWindow(QMainWindow):
         self._mark_project_dirty()
         self.mark_step_complete("mapping")
         self.navigate("review")
+
+    def _invalidate_mapping_review(self, *, preserve_plan: bool = False) -> None:
+        previous_plan = self.project_state.plan if preserve_plan else None
+        self.project_state = replace(
+            self.project_state, plan=previous_plan, outputs=None, warning_ack_revision=None,
+        )
+        self.state = replace(
+            self.state,
+            completed_steps=tuple(step for step in self.state.completed_steps if step in {"data", "template"}),
+            project_revision=self.state.project_revision + 1,
+        )
+        if self._loaded_project is not None:
+            self._loaded_project = replace(
+                self._loaded_project,
+                mapping_plan=previous_plan.to_json() if previous_plan else None,
+                output_options=None,
+                acknowledgements=(), approval=None, preview_revision=None,
+            )
+        self.review_page.clear_context()
+        self.review_page.clear_preview()
+        self.results_page.generate_button.setEnabled(False)
+        self._mark_project_dirty()
+
+    def _mapping_changed(self, plan: MappingPlan) -> None:
+        if self._read_only or self._restoring_mapping or self.project_state.plan is None:
+            return
+        if plan.to_json() != self.project_state.plan.to_json():
+            self._invalidate_mapping_review(preserve_plan=True)
+            if self._loaded_project is not None and self._loaded_project.profile_path is not None:
+                self._loaded_project = replace(self._loaded_project, profile_path=None)
+                self._mark_project_dirty()
+
+    def _save_profile(self) -> None:
+        if self._read_only or self.project_state.dataset is None or self.project_state.template is None:
+            return
+        try:
+            plan = self.match_page.mapping_plan()
+            if not plan.sources:
+                raise ProfileError("profile.no_mapping")
+            name, accepted = QInputDialog.getText(
+                self, self.catalogs.text("profile.save"), self.catalogs.text("profile.name_prompt")
+            )
+            if not accepted:
+                return
+            profile = MappingProfile.from_plan(
+                name, plan, self.project_state.template.names,
+                self.project_state.dataset.columns,
+                template_sha256=self.project_state.template.sha256,
+                defaults={
+                    "docx": self.output_page.docx.isChecked(),
+                    "individual_pdf": self.output_page.individual_pdf.isChecked(),
+                    "combined_pdf": self.output_page.combined_pdf.isChecked(),
+                    "batch_name": self.output_page.batch_name.text(),
+                },
+            )
+            has_fixed = any(record["type"] == "fixed" for record in profile.mappings.values())
+            allow_fixed = False
+            if has_fixed:
+                allow_fixed = QMessageBox.question(
+                    self, self.catalogs.text("profile.save"),
+                    self.catalogs.text("profile.fixed_confirm"),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                ) == QMessageBox.StandardButton.Yes
+                if not allow_fixed:
+                    return
+            path = self.profile_store.save(profile, allow_fixed_values=allow_fixed)
+            self.statusBar().showMessage(self.catalogs.text("profile.saved", path=str(path)))
+        except (ProfileError, OSError) as error:
+            code = getattr(error, "code", "profile.save_failed")
+            self.banner.show_issue(code, self.catalogs.text(code))
+
+    def _choose_profile(self) -> None:
+        if self._read_only:
+            return
+        selected, _ = QFileDialog.getOpenFileName(
+            self, self.catalogs.text("profile.apply"), str(self.profile_store.directory),
+            "Certificate profiles (*.certprofile)",
+        )
+        if selected:
+            self._apply_profile_path(Path(selected))
+
+    def _apply_profile_path(self, path: Path) -> None:
+        if self._read_only or self.project_state.dataset is None or self.project_state.template is None:
+            return
+        try:
+            profile = ProfileStore(Path(path).parent).load(Path(path))
+            comparison = compare_profile(
+                profile, self.project_state.dataset.columns, self.project_state.template.names
+            )
+            self._restoring_mapping = True
+            try:
+                self.match_page.set_plan(comparison.applied_plan)
+            finally:
+                self._restoring_mapping = False
+            self.match_page.show_profile_comparison(comparison)
+            self._invalidate_mapping_review()
+            for key, control in (
+                ("docx", self.output_page.docx),
+                ("individual_pdf", self.output_page.individual_pdf),
+                ("combined_pdf", self.output_page.combined_pdf),
+            ):
+                if key in profile.defaults:
+                    control.setChecked(profile.defaults[key])
+            if "batch_name" in profile.defaults:
+                self.output_page.batch_name.setText(profile.defaults["batch_name"])
+            if self._loaded_project is not None:
+                self._loaded_project = replace(self._loaded_project, profile_path=Path(path))
+                self._mark_project_dirty()
+            if profile.template_sha256 is not None and profile.template_sha256 != self.project_state.template.sha256:
+                code = "profile.template_changed"
+                self.banner.show_issue(code, self.catalogs.text(code))
+            else:
+                self.banner.clear()
+            self.statusBar().showMessage(self.catalogs.text("profile.applied"))
+        except (ProfileError, ValueError, OSError) as error:
+            code = getattr(error, "code", "profile.unreadable")
+            self.banner.show_issue(code, self.catalogs.text(code))
 
     def _accept_review(self) -> None:
         if self._read_only:
