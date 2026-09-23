@@ -19,7 +19,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BACKUP_COUNT = 3
 
 
@@ -52,6 +52,12 @@ class ProjectState:
     acknowledgements: tuple[str, ...] = ()
     active_step: str = "data"
     preview_revision: int | None = None
+    schema_version: int = SCHEMA_VERSION
+    project_name: str | None = None
+    profile_path: Path | None = None
+    approval: Mapping[str, object] | None = None
+    published_revisions: tuple[str, ...] = ()
+    print_settings: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if self.revision < 0:
@@ -71,12 +77,18 @@ class ProjectState:
             "output_options",
             _frozen_json_mapping(self.output_options),
         )
+        object.__setattr__(self, "approval", _frozen_json_mapping(self.approval))
+        object.__setattr__(self, "print_settings", _frozen_json_mapping(self.print_settings))
         object.__setattr__(
             self,
             "template_path",
             Path(self.template_path) if self.template_path else None,
         )
         object.__setattr__(self, "acknowledgements", tuple(self.acknowledgements))
+        object.__setattr__(
+            self, "profile_path", Path(self.profile_path) if self.profile_path else None
+        )
+        object.__setattr__(self, "published_revisions", tuple(self.published_revisions))
 
     def reconcile_template(self) -> "ProjectState":
         """Invalidate every downstream decision when referenced bytes changed."""
@@ -112,6 +124,12 @@ class ProjectState:
             "acknowledgements": list(self.acknowledgements),
             "active_step": self.active_step,
             "preview_revision": self.preview_revision,
+            "schema_version": self.schema_version,
+            "project_name": self.project_name,
+            "profile_path": str(self.profile_path) if self.profile_path else None,
+            "approval": _plain_json(self.approval),
+            "published_revisions": list(self.published_revisions),
+            "print_settings": _plain_json(self.print_settings),
         }
 
     @classmethod
@@ -128,6 +146,12 @@ class ProjectState:
             acknowledgements=tuple(payload.get("acknowledgements", ())),
             active_step=str(payload.get("active_step", "data")),
             preview_revision=payload.get("preview_revision"),
+            schema_version=int(payload.get("schema_version", 1)),
+            project_name=payload.get("project_name"),
+            profile_path=payload.get("profile_path"),
+            approval=payload.get("approval"),
+            published_revisions=tuple(payload.get("published_revisions", ())),
+            print_settings=payload.get("print_settings"),
         )
 
 
@@ -191,7 +215,10 @@ class ProjectStore:
             raise ProjectCorruptError("project.unreadable") from error
         if row is None:
             raise ProjectCorruptError("project.schema_missing")
-        version = int(row[0])
+        try:
+            version = int(row[0])
+        except ValueError as error:
+            raise ProjectCorruptError("project.schema_invalid") from error
         if version > SCHEMA_VERSION:
             return cls(path, read_only=True, issue_code="project.newer_schema")
         if version < SCHEMA_VERSION:

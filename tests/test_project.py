@@ -195,3 +195,40 @@ def test_project_accepts_typed_mapping_and_output_records(tmp_path):
 
     assert MappingPlan.from_json(reopened.mapping_plan).sources["FULL_NAME"] == ColumnValue("full_name")
     assert reopened.output_options["row_ids"] == ["row-ru", "row-cn"]
+
+
+def test_schema2_project_fields_survive_round_trip(tmp_path):
+    state = ProjectState(
+        revision=1,
+        dataset=_dataset(),
+        project_name="奖项 Анна",
+        profile_path=tmp_path / "settings.profile",
+        approval={"digest": "abc", "reviewer": "Mira"},
+        published_revisions=("batch-001", "batch-002"),
+        print_settings={"duplex": True, "copies": 2},
+    )
+    store = ProjectStore.create(tmp_path / "schema2.certproject")
+    store.save(state)
+
+    reopened = ProjectStore.open(store.path).load()
+    assert reopened.schema_version == 2
+    assert reopened.project_name == "奖项 Анна"
+    assert reopened.profile_path == tmp_path / "settings.profile"
+    assert reopened.approval == {"digest": "abc", "reviewer": "Mira"}
+    assert reopened.published_revisions == ("batch-001", "batch-002")
+    assert reopened.print_settings == {"duplex": True, "copies": 2}
+
+
+def test_schema1_payload_reads_with_safe_defaults(tmp_path):
+    payload = _state(tmp_path).to_payload()
+    for field in ("schema_version", "project_name", "profile_path", "approval", "published_revisions", "print_settings"):
+        payload.pop(field, None)
+
+    reopened = ProjectState.from_payload(payload)
+
+    assert reopened.schema_version == 1
+    assert reopened.project_name is None
+    assert reopened.profile_path is None
+    assert reopened.approval is None
+    assert reopened.published_revisions == ()
+    assert reopened.print_settings is None
