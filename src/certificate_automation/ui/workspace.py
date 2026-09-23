@@ -37,8 +37,7 @@ from certificate_automation.batch import BatchRequest, CancellationToken
 from certificate_automation.i18n import CatalogError, CatalogSet, SUPPORTED_LOCALES, package_root
 from certificate_automation.mapping import MappingPlan, evaluate_plan
 from certificate_automation.output_options import OutputOptions
-from certificate_automation.project import ProjectStore
-from certificate_automation.project import ProjectCoordinator, ProjectSaveError, ProjectState
+from certificate_automation.project import ProjectCoordinator, ProjectSaveError, ProjectState, ProjectStore
 from certificate_automation.project_catalog import ProjectCatalog
 from certificate_automation.project_migration import ProjectMigrationService
 from certificate_automation.template import inspect_template
@@ -202,6 +201,7 @@ class WorkspaceWindow(QMainWindow):
         self._close_when_idle = False
         self.coordinator: ProjectCoordinator | None = None
         self._read_only = False
+        self._hydrating_project = False
         self._loaded_project: ProjectState | None = None
         self._last_migration_backup: Path | None = None
         self.save_state = SaveState.SAVED
@@ -231,6 +231,8 @@ class WorkspaceWindow(QMainWindow):
         self.home.example_requested.connect(self._try_example)
         self.home.project_requested.connect(self._open_recent_project)
         self.home.repair_requested.connect(self._repair_recent_project)
+        self.home.retry_save_requested.connect(self._retry_save)
+        self.home.return_to_project_requested.connect(self._return_to_project)
         self.home_button.clicked.connect(self._show_home)
         self.retry_save_button.clicked.connect(self._retry_save)
         self.step_rail.step_requested.connect(self.navigate)
@@ -381,12 +383,14 @@ class WorkspaceWindow(QMainWindow):
         self.data_page.set_dataset(dataset)
         self.state = WorkspaceState(current_step="data", project_path=Path(path) if path else None)
         self.project_state = OperatorProjectState(dataset=dataset)
+        self._reset_workflow_pages(dataset)
         if store is not None:
             self._attach_store(store)
             self.project_catalog.remember(Path(path), project)
             self._refresh_recent_projects()
         self._set_save_state(SaveState.SAVED)
         self._set_read_only_mode(False)
+        self.output_page.continue_button.setEnabled(False)
         self.banner.clear()
         self.root_stack.setCurrentWidget(self.workspace_surface)
         self._show_step("data")
@@ -407,13 +411,13 @@ class WorkspaceWindow(QMainWindow):
         self.statusBar().clearMessage()
         self._loaded_project = project
         self._read_only = store.read_only
-        self.data_page.set_dataset(project.dataset)
+        self._hydrating_project = True
+        try:
+            self.data_page.set_dataset(project.dataset)
+        finally:
+            self._hydrating_project = False
         self.project_state = restored
-        self.template_page.inspection = None
-        self.template_page.placeholder_list.clear()
-        self.template_page.file_name.setText("—")
-        self.template_page.hash_label.setText("—")
-        self.template_page.continue_button.setEnabled(False)
+        self._reset_workflow_pages(project.dataset)
         if restored.template is not None:
             self.template_page.set_inspection(restored.template)
         self.match_page.set_context(
@@ -431,17 +435,11 @@ class WorkspaceWindow(QMainWindow):
                 project = self._clear_invalid_project_state(project, "mapping", target_step)
                 self._loaded_project = project
                 self.match_page.set_context(project.dataset, restored.template.names)
-        self.review_page.clear_preview()
-        self.review_page.set_issues(())
-        self.review_page.recipient_selector.clear()
-        self.review_page.values_table.setRowCount(0)
         if restored.plan is not None:
             self.review_page.set_context(project.dataset, restored.plan)
         self.output_page.set_order(project.dataset.order)
         if restored.outputs is not None:
             self.output_page.set_options(restored.outputs)
-        else:
-            self.output_page.destination.clear()
         self.state = WorkspaceState(
             current_step=target_step,
             completed_steps=STEP_IDS[:STEP_IDS.index(target_step)],
@@ -464,6 +462,16 @@ class WorkspaceWindow(QMainWindow):
         self.root_stack.setCurrentWidget(self.workspace_surface)
         self._show_step(self.state.current_step)
         self._update_migration_status()
+
+    def _reset_workflow_pages(self, dataset: TabularDataset) -> None:
+        self.template_page.clear_inspection()
+        self.match_page.set_context(dataset, ())
+        self.review_page.clear_context()
+        self.output_page.reset_options()
+        self.results_page.set_ready()
+        self.results_page.progress.setValue(0)
+        self.results_page.status_label.clear()
+        self.results_page.generate_button.setEnabled(False)
 
     def _restore_project_state(
         self, project: ProjectState
@@ -602,6 +610,7 @@ class WorkspaceWindow(QMainWindow):
         for card in self.match_page.cards.values():
             for control in (
                 card.type_combo, card.column_combo, card.fixed_input,
+                card.join_columns, card.join_separator,
                 card.input_format, card.output_format,
             ):
                 control.setEnabled(not read_only)
@@ -609,7 +618,9 @@ class WorkspaceWindow(QMainWindow):
             self.match_page.continue_button.setEnabled(False)
         else:
             self.match_page._changed()
-        self.results_page.generate_button.setEnabled(not read_only)
+        self.results_page.generate_button.setEnabled(
+            not read_only and self.project_state.outputs is not None
+        )
         self.results_page.cancel_button.setEnabled(False if read_only else self.results_page.cancel_button.isEnabled())
         if not read_only:
             self.data_page.undo_button.setEnabled(self.data_page.model.undo_stack.canUndo())
@@ -626,11 +637,13 @@ class WorkspaceWindow(QMainWindow):
         self.save_state_label.setAccessibleName(label)
         self.home.save_state_label.setText(label)
         self.home.save_state_label.setAccessibleName(label)
-        self.retry_save_button.setVisible(
+        retry_available = (
             state == SaveState.FAILED
             and self.coordinator is not None
             and self.coordinator.has_pending
         )
+        self.retry_save_button.setVisible(retry_available)
+        self.home.set_retry_available(retry_available)
 
     def _project_saved(self, _revision: int) -> None:
         self._set_save_state(SaveState.SAVED)
@@ -760,7 +773,12 @@ class WorkspaceWindow(QMainWindow):
             self.step_rail.set_compact(event.size().width() < 760)
 
     def _show_home(self) -> None:
+        self.home.set_current_project_available(self.state.project_path is not None)
         self.root_stack.setCurrentWidget(self.home)
+
+    def _return_to_project(self) -> None:
+        if self.state.project_path is not None:
+            self.root_stack.setCurrentWidget(self.workspace_surface)
 
     def _show_step(self, step: str) -> None:
         changed = step != self.state.current_step
@@ -954,6 +972,8 @@ class WorkspaceWindow(QMainWindow):
     def _data_changed(self, _dataset: TabularDataset) -> None:
         if not hasattr(self, "save_state_label"):
             return
+        if self._hydrating_project:
+            return
         if self._read_only and self._loaded_project is not None:
             if _dataset != self._loaded_project.dataset:
                 self.data_page.set_dataset(self._loaded_project.dataset)
@@ -1066,6 +1086,7 @@ class WorkspaceWindow(QMainWindow):
         if self._read_only:
             return
         self.output_page.set_order(self.project_state.dataset.order)
+        self.output_page.continue_button.setEnabled(True)
         availability = getattr(self.services, "word_availability", None)
         if callable(availability):
             self.output_page.set_word_availability(availability())
@@ -1076,6 +1097,7 @@ class WorkspaceWindow(QMainWindow):
         if self._read_only:
             return
         self.project_state = replace(self.project_state, outputs=outputs)
+        self.results_page.generate_button.setEnabled(True)
         self.state = replace(self.state, project_revision=self.state.project_revision + 1)
         self._mark_project_dirty()
         self.mark_step_complete("output")

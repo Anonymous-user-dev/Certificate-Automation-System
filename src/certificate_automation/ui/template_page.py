@@ -68,6 +68,14 @@ class TemplatePage(QWidget):
         self.error_label.clear()
         self.continue_button.setEnabled(bool(inspection.placeholders))
 
+    def clear_inspection(self) -> None:
+        self.inspection = None
+        self.file_name.setText("—")
+        self.hash_label.setText("—")
+        self.placeholder_list.clear()
+        self.error_label.clear()
+        self.continue_button.setEnabled(False)
+
     def show_template_error(self, code: str, parameters=None) -> None:
         self.error_label.setText(self._catalogs.text(code, **dict(parameters or {})))
         self.continue_button.setEnabled(False)

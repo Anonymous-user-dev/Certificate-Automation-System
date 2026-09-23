@@ -86,6 +86,16 @@ class OutputPage(QWidget):
         self.destination.setText(str(options.destination))
         self.batch_name.setText(options.batch_name)
 
+    def reset_options(self) -> None:
+        self.set_order(())
+        self.docx.setChecked(True)
+        self.individual_pdf.setChecked(True)
+        self.combined_pdf.setChecked(False)
+        self.destination.clear()
+        self.batch_name.setText(self._catalogs.text("output.default_batch_name"))
+        self.error_label.clear()
+        self.continue_button.setEnabled(False)
+
     def options(self, generation_order: tuple[str, ...] | None = None) -> OutputOptions:
         return OutputOptions(
             self.docx.isChecked(),

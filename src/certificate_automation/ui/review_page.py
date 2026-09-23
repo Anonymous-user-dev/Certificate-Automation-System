@@ -67,6 +67,14 @@ class ReviewPage(QWidget):
             self.recipient_selector.addItem(label, row_id)
         self._show_recipient()
 
+    def clear_context(self) -> None:
+        self._dataset = None
+        self._plan = None
+        self.recipient_selector.clear()
+        self.values_table.setRowCount(0)
+        self.set_issues(())
+        self.clear_preview()
+
     def set_issues(self, issues: tuple[Issue, ...]) -> None:
         self.issue_list.clear()
         for issue in issues:

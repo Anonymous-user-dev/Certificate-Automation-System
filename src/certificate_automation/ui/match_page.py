@@ -51,10 +51,14 @@ class MappingCard(QWidget):
         for column in dataset.columns:
             self.column_combo.addItem(column.label, column.column_id)
         self.fixed_input = QLineEdit()
+        self.join_columns = QLineEdit(", ".join(column.column_id for column in dataset.columns))
+        self.join_separator = QLineEdit(" ")
         self.input_format = QLineEdit("%Y-%m-%d")
         self.output_format = QLineEdit("%d %B %Y")
         self.column_label = QLabel()
         self.fixed_label = QLabel()
+        self.join_columns_label = QLabel()
+        self.join_separator_label = QLabel()
         self.date_help = QLabel()
         self.date_help.setWordWrap(True)
         self.input_format_label = QLabel()
@@ -64,12 +68,16 @@ class MappingCard(QWidget):
         layout.addRow(self.help_label)
         layout.addRow(self.column_label, self.column_combo)
         layout.addRow(self.fixed_label, self.fixed_input)
+        layout.addRow(self.join_columns_label, self.join_columns)
+        layout.addRow(self.join_separator_label, self.join_separator)
         layout.addRow(self.date_help)
         layout.addRow(self.input_format_label, self.input_format)
         layout.addRow(self.output_format_label, self.output_format)
         self.type_combo.currentIndexChanged.connect(self._type_changed)
         self.column_combo.currentIndexChanged.connect(self.changed)
         self.fixed_input.textChanged.connect(self.changed)
+        self.join_columns.textChanged.connect(self.changed)
+        self.join_separator.textChanged.connect(self.changed)
         self.input_format.textChanged.connect(self.changed)
         self.output_format.textChanged.connect(self.changed)
         self.retranslate()
@@ -92,12 +100,16 @@ class MappingCard(QWidget):
         )
         self.column_label.setText(self.catalogs.text("mapping.column"))
         self.fixed_label.setText(self.catalogs.text("mapping.fixed"))
+        self.join_columns_label.setText(self.catalogs.text("mapping.join_columns"))
+        self.join_separator_label.setText(self.catalogs.text("mapping.join_separator"))
         self.date_help.setText(self.catalogs.text("mapping.date_help"))
         self.input_format_label.setText(self.catalogs.text("mapping.input_format"))
         self.output_format_label.setText(self.catalogs.text("mapping.output_format"))
         self.type_combo.setAccessibleName(self.label.text())
         self.column_combo.setAccessibleName(self.column_label.text())
         self.fixed_input.setAccessibleName(self.fixed_label.text())
+        self.join_columns.setAccessibleName(self.join_columns_label.text())
+        self.join_separator.setAccessibleName(self.join_separator_label.text())
         self.input_format.setAccessibleName(self.input_format_label.text())
         self.output_format.setAccessibleName(self.output_format_label.text())
 
@@ -109,11 +121,17 @@ class MappingCard(QWidget):
         kind = self.type_combo.currentData()
         uses_column = kind in {"column", "formatted_date"}
         is_fixed = kind == "fixed"
+        is_join = kind == "join"
         is_date = kind == "formatted_date"
         for widget in (self.column_label, self.column_combo):
             widget.setVisible(uses_column)
         for widget in (self.fixed_label, self.fixed_input):
             widget.setVisible(is_fixed)
+        for widget in (
+            self.join_columns_label, self.join_columns,
+            self.join_separator_label, self.join_separator,
+        ):
+            widget.setVisible(is_join)
         for widget in (
             self.date_help,
             self.input_format_label,
@@ -152,10 +170,12 @@ class MappingCard(QWidget):
             self.input_format.setText(source.input_format)
             self.output_format.setText(source.output_format)
             self.type_combo.setCurrentIndex(self.type_combo.findData("formatted_date"))
-        elif isinstance(source, JoinValue) and (
-            source.column_ids == tuple(column.column_id for column in self.dataset.columns)
-            and source.separator == " "
-        ):
+        elif isinstance(source, JoinValue):
+            known = {column.column_id for column in self.dataset.columns}
+            if any(column_id not in known for column_id in source.column_ids):
+                raise MappingPlanError("mapping.unknown_column")
+            self.join_columns.setText(", ".join(source.column_ids))
+            self.join_separator.setText(source.separator)
             self.type_combo.setCurrentIndex(self.type_combo.findData("join"))
         else:
             raise MappingPlanError("mapping.invalid_json")
@@ -177,7 +197,13 @@ class MappingCard(QWidget):
                 self.output_format.text(),
             )
         if kind == "join":
-            return JoinValue(tuple(column.column_id for column in self.dataset.columns), " ")
+            column_ids = tuple(
+                item.strip() for item in self.join_columns.text().split(",") if item.strip()
+            )
+            known = {column.column_id for column in self.dataset.columns}
+            if any(column_id not in known for column_id in column_ids):
+                raise MappingPlanError("mapping.unknown_column")
+            return JoinValue(column_ids, self.join_separator.text())
         return None
 
 
@@ -257,7 +283,11 @@ class MatchPage(QWidget):
         self.continue_button.setAccessibleName(self.continue_button.text())
 
     def _changed(self) -> None:
-        plan = self.mapping_plan()
+        try:
+            plan = self.mapping_plan()
+        except MappingPlanError:
+            self.continue_button.setEnabled(False)
+            return
         complete = bool(self.cards) and not plan.unresolved(tuple(self.cards))
         self.continue_button.setEnabled(complete)
         self.plan_changed.emit(plan)

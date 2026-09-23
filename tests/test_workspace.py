@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QAbstractButton, QAbstractItemView, QComboBox, QLi
 import pytest
 
 from certificate_automation.i18n import CatalogSet, package_root
+from certificate_automation.dataset import Column, DataRow, TabularDataset
 from certificate_automation.domain import BatchResult, BatchState
 from certificate_automation.ui.workspace import WorkspaceWindow
 from certificate_automation.ui.workspace import SaveState
@@ -181,6 +182,54 @@ def _saved_with_downstream_state(workspace, path, template_path, tmp_path):
     return stored
 
 
+def test_reopen_navigation_preserves_valid_review_facts_on_disk(
+    workspace, tmp_path, docx_factory
+):
+    path = tmp_path / "Review facts.certproject"
+    template = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
+    original = _saved_with_downstream_state(workspace, path, template, tmp_path)
+
+    workspace.navigate("output")
+    assert workspace.coordinator.flush()
+    reopened = ProjectStore.open(path).load()
+
+    assert reopened.acknowledgements == original.acknowledgements
+    assert reopened.approval == original.approval
+    assert reopened.preview_revision == original.preview_revision
+    assert reopened.active_step == "output"
+
+
+def test_new_project_clears_all_prior_workflow_widgets(
+    workspace, tmp_path, docx_factory
+):
+    first = tmp_path / "First complete.certproject"
+    second = tmp_path / "Second empty.certproject"
+    template = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
+    _saved_with_downstream_state(workspace, first, template, tmp_path)
+    assert workspace.template_page.inspection is not None
+    assert workspace.match_page.cards
+    assert workspace.review_page.recipient_selector.count() == 1
+    assert workspace.output_page.destination.text()
+
+    workspace.new_project(second)
+
+    assert workspace.current_step == "data"
+    assert workspace.project_state.template is None
+    assert workspace.project_state.plan is None
+    assert workspace.project_state.outputs is None
+    assert workspace.template_page.inspection is None
+    assert workspace.template_page.placeholder_list.count() == 0
+    assert not workspace.template_page.continue_button.isEnabled()
+    assert not workspace.match_page.cards
+    assert not workspace.match_page.continue_button.isEnabled()
+    assert workspace.review_page.recipient_selector.count() == 0
+    assert workspace.review_page.values_table.rowCount() == 0
+    assert not workspace.review_page.preview_status.text()
+    assert not workspace.output_page.destination.text()
+    assert not workspace.output_page.continue_button.isEnabled()
+    assert not workspace.results_page.generate_button.isEnabled()
+
+
 @pytest.mark.parametrize("step", ("template", "mapping", "output", "generate"))
 def test_reopen_restores_saved_context_and_exact_valid_step(
     workspace, tmp_path, docx_factory, step
@@ -221,6 +270,47 @@ def test_reopen_at_mapping_keeps_unresolved_continue_disabled(workspace, tmp_pat
 
     assert workspace.current_step == "mapping"
     assert not workspace.match_page.continue_button.isEnabled()
+
+
+def test_custom_join_mapping_survives_reopen_navigation_and_save(
+    workspace, tmp_path, docx_factory
+):
+    path = tmp_path / "Custom join.certproject"
+    template = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
+    workspace.new_project(path)
+    initial = ProjectStore.open(path).load()
+    dataset = TabularDataset(
+        (Column("first", "First"), Column("middle", "Middle"), Column("last", "Last")),
+        (DataRow("row-1", None, {"first": "Ada", "middle": "Byron", "last": "Lovelace"}),),
+        initial.dataset.source,
+    )
+    inspection = inspect_template(template)
+    stored = replace(
+        initial, revision=5, dataset=dataset,
+        template_path=template, template_sha256=inspection.sha256,
+        template_inspection={"sha256": inspection.sha256, "names": ["FULL_NAME"]},
+        mapping_plan={"FULL_NAME": {
+            "type": "join", "column_ids": ["last", "first"], "separator": ", "
+        }},
+        active_step="review",
+    )
+    ProjectStore.open(path).save(stored)
+
+    workspace.load_project(path)
+
+    assert workspace.current_step == "review"
+    card = workspace.match_page.cards["FULL_NAME"]
+    assert card.mapping_source().column_ids == ("last", "first")
+    assert card.mapping_source().separator == ", "
+    assert workspace.review_page.values_table.item(0, 1).text() == "Lovelace, Ada"
+    card.join_columns.setText("unknown")
+    assert not workspace.match_page.continue_button.isEnabled()
+    card.join_columns.setText("last, first")
+    assert workspace.match_page.continue_button.isEnabled()
+    workspace.navigate("mapping")
+    workspace.navigate("review")
+    assert workspace.coordinator.flush()
+    assert ProjectStore.open(path).load().mapping_plan == stored.mapping_plan
 
 
 @pytest.mark.parametrize("damage", ("missing", "changed"))
@@ -320,6 +410,8 @@ def test_newer_schema_disables_restored_mapping_review_and_output_edits(
     workspace.load_project(path)
 
     assert not workspace.match_page.cards["FULL_NAME"].type_combo.isEnabled()
+    assert not workspace.match_page.cards["FULL_NAME"].join_columns.isEnabled()
+    assert not workspace.match_page.cards["FULL_NAME"].join_separator.isEnabled()
     assert not workspace.match_page.continue_button.isEnabled()
     assert workspace.review_page.values_table.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
     assert not workspace.review_page.preview_button.isEnabled()
@@ -405,6 +497,39 @@ def test_failed_autosave_retry_again_keeps_pending_revision(workspace, qtbot, tm
         assert workspace.save_state == SaveState.FAILED
         assert workspace.retry_save_button.isVisible()
         assert workspace.coordinator.has_pending
+    finally:
+        workspace.coordinator._timer.stop()
+        workspace.coordinator._pending = None
+
+
+def test_failed_save_can_retry_and_return_from_home(workspace, qtbot, tmp_path):
+    path = tmp_path / "Home retry.certproject"
+    workspace.new_project(path)
+    path.unlink()
+    workspace.data_page.model.setData(
+        workspace.data_page.model.index(0, 0), "Ada", Qt.ItemDataRole.EditRole
+    )
+    assert not workspace.coordinator.flush()
+
+    try:
+        qtbot.mouseClick(workspace.home_button, Qt.MouseButton.LeftButton)
+        assert workspace.root_stack.currentWidget() is workspace.home
+        assert workspace.home.retry_save_button.isVisibleTo(workspace)
+        assert workspace.home.retry_save_button.accessibleName() == workspace.catalogs.text("save_state.retry")
+        assert workspace.home.return_to_project_button.isVisibleTo(workspace)
+        qtbot.mouseClick(workspace.home.retry_save_button, Qt.MouseButton.LeftButton)
+        assert workspace.save_state == SaveState.FAILED
+        assert workspace.coordinator.has_pending
+        assert workspace.home.retry_save_button.isVisibleTo(workspace)
+
+        ProjectStore.create(path)
+        qtbot.mouseClick(workspace.home.retry_save_button, Qt.MouseButton.LeftButton)
+        assert workspace.save_state == SaveState.SAVED
+        assert not workspace.coordinator.has_pending
+        assert not workspace.home.retry_save_button.isVisibleTo(workspace)
+        assert ProjectStore.open(path).load().dataset.rows[0].value("column-1") == "Ada"
+        qtbot.mouseClick(workspace.home.return_to_project_button, Qt.MouseButton.LeftButton)
+        assert workspace.root_stack.currentWidget() is workspace.workspace_surface
     finally:
         workspace.coordinator._timer.stop()
         workspace.coordinator._pending = None

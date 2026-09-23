@@ -18,6 +18,8 @@ class ProjectHomePage(QWidget):
     example_requested = Signal()
     project_requested = Signal(Path)
     repair_requested = Signal(Path)
+    retry_save_requested = Signal()
+    return_to_project_requested = Signal()
 
     def __init__(self, catalogs: CatalogSet, parent=None) -> None:
         super().__init__(parent)
@@ -32,6 +34,10 @@ class ProjectHomePage(QWidget):
         self.save_state_label = QLabel()
         self.save_state_label.setObjectName("homeSaveState")
         self.save_state_label.setProperty("role", "muted")
+        self.retry_save_button = QPushButton()
+        self.retry_save_button.hide()
+        self.return_to_project_button = QPushButton()
+        self.return_to_project_button.hide()
         self.new_project_button = QPushButton()
         self.open_project_button = QPushButton()
         self.recent_projects_button = QPushButton()
@@ -64,6 +70,8 @@ class ProjectHomePage(QWidget):
         layout.addWidget(self.title)
         layout.addWidget(self.subtitle)
         layout.addWidget(self.save_state_label)
+        layout.addWidget(self.retry_save_button)
+        layout.addWidget(self.return_to_project_button)
         layout.addSpacing(12)
         layout.addWidget(card)
         layout.addWidget(self.recent_scroll, 1)
@@ -72,6 +80,8 @@ class ProjectHomePage(QWidget):
         self.recover_project_button.clicked.connect(self.recover_requested)
         self.try_example_button.clicked.connect(self.example_requested)
         self.recent_projects_button.clicked.connect(self._focus_recent)
+        self.retry_save_button.clicked.connect(self.retry_save_requested)
+        self.return_to_project_button.clicked.connect(self.return_to_project_requested)
         for first, second in zip(self.primary_buttons(), self.primary_buttons()[1:]):
             self.setTabOrder(first, second)
         self.retranslate()
@@ -84,6 +94,12 @@ class ProjectHomePage(QWidget):
             self.recover_project_button,
             self.try_example_button,
         )
+
+    def set_current_project_available(self, available: bool) -> None:
+        self.return_to_project_button.setVisible(available)
+
+    def set_retry_available(self, available: bool) -> None:
+        self.retry_save_button.setVisible(available)
 
     def set_projects(self, projects: tuple[ProjectSummary, ...]) -> None:
         self._projects = tuple(projects)
@@ -128,6 +144,12 @@ class ProjectHomePage(QWidget):
     def retranslate(self) -> None:
         self.title.setText(self._catalogs.text("home.title"))
         self.subtitle.setText(self._catalogs.text("home.subtitle"))
+        for control, key in (
+            (self.retry_save_button, "save_state.retry"),
+            (self.return_to_project_button, "home.return_to_project"),
+        ):
+            control.setText(self._catalogs.text(key))
+            control.setAccessibleName(control.text())
         for button, key in zip(
             self.primary_buttons(),
             ("home.new_project", "home.open_project", "home.recent_projects", "home.recover_project", "home.try_example"),
