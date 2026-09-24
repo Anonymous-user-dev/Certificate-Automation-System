@@ -39,6 +39,15 @@ class OutputOptions:
         batch_name = str(self.batch_name).strip()
         if self.combined_pdf and not is_safe_windows_stem(batch_name):
             raise OutputOptionsError("output.invalid_batch_name")
+        if self.combined_pdf and self.print_settings is None:
+            raise OutputOptionsError("output.print_settings_required")
+        if self.print_settings is not None:
+            try:
+                if not isinstance(self.print_settings, PrintSettings):
+                    raise ValueError("print.settings_invalid")
+                PrintSettings.from_json(self.print_settings.to_json())
+            except (ValueError, TypeError, KeyError, AttributeError, ArithmeticError) as error:
+                raise OutputOptionsError("output.print_settings_required") from error
         if self.print_settings is not None and self.print_settings.separator_every is not None and not self.combined_pdf:
             raise OutputOptionsError("output.separator_requires_combined")
         object.__setattr__(self, "destination", destination)

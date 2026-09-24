@@ -71,6 +71,19 @@ def test_separator_choice_requires_combined_pdf(tmp_path):
     assert caught.value.code == "output.separator_requires_combined"
 
 
+def test_combined_pdf_requires_explicit_valid_print_settings(tmp_path):
+    with pytest.raises(OutputOptionsError) as caught:
+        OutputOptions(False, False, True, tmp_path, "Awards", ("row-1",))
+    assert caught.value.code == "output.print_settings_required"
+
+    with pytest.raises(OutputOptionsError) as reopened:
+        OutputOptions.from_json({
+            "docx": False, "individual_pdf": False, "combined_pdf": True,
+            "destination": str(tmp_path), "batch_name": "Awards", "row_ids": ["row-1"],
+        })
+    assert reopened.value.code == "output.print_settings_required"
+
+
 @pytest.mark.parametrize("name", ["CON", "con.txt", "AUX", "NUL", "COM1", "Lpt9"])
 def test_reserved_windows_names_are_rewritten(name):
     assert safe_stem(name).casefold().split(".")[0] not in RESERVED_NAMES

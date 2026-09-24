@@ -18,6 +18,7 @@ from certificate_automation.pdf_merge import merge_verified_pdfs
 from certificate_automation.print_readiness import (
     ExportError, ExportService, PrintReadinessService, PrintSettings,
 )
+from certificate_automation.integrity import IntegrityReport, IntegrityService
 
 
 def _pdf(path: Path, width: float = 612, height: float = 792, *, crop_width: float | None = None) -> Path:
@@ -211,20 +212,98 @@ def test_export_refuses_changed_local_source_before_copy(tmp_path):
     assert not (destination / revision.name).exists()
 
 
-def test_export_never_overwrites_file_that_appears_in_new_copy_folder(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ("copy", "hash", "fsync", "integrity"))
+def test_export_failure_leaves_no_final_folder_or_temp_and_can_retry(tmp_path, monkeypatch, failure):
     revision = _revision(tmp_path)
     destination = tmp_path / "copy"
     target = destination / revision.name
-    real_mkdir = Path.mkdir
+    real_hash = sha256_file
 
-    def planted_mkdir(path, *args, **kwargs):
-        result = real_mkdir(path, *args, **kwargs)
-        if path == target:
-            (target / "manifest.json").write_bytes(b"someone else's file")
-        return result
+    with monkeypatch.context() as injected:
+        if failure == "copy":
+            def interrupted_copy(source, copied, length):
+                copied.write(b"partial")
+                raise OSError("copy interrupted")
+            injected.setattr("certificate_automation.print_readiness.shutil.copyfileobj", interrupted_copy)
+        elif failure == "hash":
+            injected.setattr(
+                "certificate_automation.print_readiness.sha256_file",
+                lambda path: "0" * 64 if destination in Path(path).parents else real_hash(path),
+            )
+        elif failure == "fsync":
+            injected.setattr("certificate_automation.print_readiness.os.fsync",
+                             lambda descriptor: (_ for _ in ()).throw(OSError("fsync failed")))
+        else:
+            class FailedCopyIntegrity(IntegrityService):
+                def verify_revision(self, path, **kwargs):
+                    if Path(path) != revision:
+                        return IntegrityReport(False, ("injected copy corruption",))
+                    return super().verify_revision(path, **kwargs)
+            service = ExportService(FailedCopyIntegrity())
 
-    monkeypatch.setattr(Path, "mkdir", planted_mkdir)
+        with pytest.raises(ExportError):
+            (service if failure == "integrity" else ExportService()).export_revision(revision, destination)
+
+    assert not target.exists()
+    assert not list(destination.glob(".certificate-export-*"))
+    assert IntegrityService().verify_revision(revision).valid
+    assert ExportService().export_revision(revision, destination).exported_copy == target
+
+
+def test_export_preserves_preexisting_destination_and_creates_no_temp(tmp_path):
+    revision = _revision(tmp_path)
+    destination = tmp_path / "copy"
+    target = destination / revision.name
+    target.mkdir(parents=True)
+    sentinel = target / "do-not-touch.txt"
+    sentinel.write_text("existing copy", encoding="utf-8")
+
+    with pytest.raises(ExportError) as raised:
+        ExportService().export_revision(revision, destination)
+
+    assert raised.value.code == "export.destination_exists"
+    assert sentinel.read_text(encoding="utf-8") == "existing copy"
+    assert not list(destination.glob(".certificate-export-*"))
+
+
+def test_export_refuses_racing_target_without_overwriting_it(tmp_path, monkeypatch):
+    revision = _revision(tmp_path)
+    destination = tmp_path / "copy"
+    target = destination / revision.name
+    from certificate_automation import print_readiness
+
+    real_rename = print_readiness._rename_no_replace
+
+    def plant_target(source, published):
+        published.mkdir()
+        (published / "do-not-touch.txt").write_text("racing copy", encoding="utf-8")
+        real_rename(source, published)
+
+    monkeypatch.setattr(print_readiness, "_rename_no_replace", plant_target)
+
+    with pytest.raises(ExportError) as raised:
+        ExportService().export_revision(revision, destination)
+
+    assert raised.value.code == "export.destination_exists"
+    assert (target / "do-not-touch.txt").read_text(encoding="utf-8") == "racing copy"
+    assert not list(destination.glob(".certificate-export-*"))
+
+
+def test_export_does_not_remove_preexisting_temp_name_on_collision(tmp_path, monkeypatch):
+    revision = _revision(tmp_path)
+    destination = tmp_path / "copy"
+    occupied = destination / ".certificate-export-0123456789abcdef"
+    occupied.mkdir(parents=True)
+    sentinel = occupied / "do-not-touch.txt"
+    sentinel.write_text("existing temporary folder", encoding="utf-8")
+
+    class FixedUuid:
+        hex = "0123456789abcdef9999999999999999"
+
+    monkeypatch.setattr("certificate_automation.print_readiness.uuid4", lambda: FixedUuid())
 
     with pytest.raises(ExportError):
         ExportService().export_revision(revision, destination)
-    assert (target / "manifest.json").read_bytes() == b"someone else's file"
+
+    assert sentinel.read_text(encoding="utf-8") == "existing temporary folder"
+    assert not (destination / revision.name).exists()

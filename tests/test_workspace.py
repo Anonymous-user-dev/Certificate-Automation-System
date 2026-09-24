@@ -386,6 +386,19 @@ def test_output_page_inherits_template_geometry_and_forecasts_separator_pages(wo
     assert page.separator_every_label.text() == workspace.catalogs.text("output.separator_every")
 
 
+def test_combined_choice_without_known_page_size_shows_repair_message(workspace, tmp_path):
+    page = workspace.output_page
+    page.reset_options()
+    page.set_order(("row-1",))
+    page.combined_pdf.setChecked(True)
+    page.destination.setText(str(tmp_path))
+    page.continue_button.setEnabled(True)
+
+    page.continue_button.click()
+
+    assert page.error_label.text() == workspace.catalogs.text("output.print_settings_required")
+
+
 def test_changing_print_settings_invalidates_frozen_approval(workspace, tmp_path, docx_factory):
     _ready_approval_workspace(workspace, tmp_path, docx_factory)
     workspace.approval_page.preparer_name.setText("Alice")
@@ -696,6 +709,25 @@ def test_reopen_navigation_preserves_valid_review_facts_on_disk(
     assert reopened.approval is None  # an unrecognized legacy approval cannot authorize generation
     assert reopened.preview_revision == original.preview_revision
     assert reopened.active_step == "output"
+
+
+def test_reopen_legacy_combined_choice_requires_print_settings_review(workspace, tmp_path, docx_factory):
+    path = tmp_path / "Old combined.certproject"
+    template = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
+    old = _saved_with_downstream_state(workspace, path, template, tmp_path)
+    legacy_output = dict(old.output_options)
+    legacy_output.update({"docx": False, "combined_pdf": True})
+    ProjectStore.open(path).save(replace(
+        old, revision=6, output_options=legacy_output,
+        approval={"digest": "old-approval"}, active_step="generate",
+    ))
+
+    workspace.load_project(path)
+
+    assert workspace.current_step == "output"
+    assert workspace.project_state.outputs is None
+    assert workspace.banner.issue_code == "project.resume_output_repair"
+    assert workspace._loaded_project.approval is None
 
 
 def test_new_project_clears_all_prior_workflow_widgets(
@@ -1470,7 +1502,10 @@ def test_resumed_project_result_uses_saved_combined_choice(workspace, tmp_path):
     output.mkdir()
     workspace.project_state = replace(
         workspace.project_state,
-        outputs=OutputOptions(False, False, True, tmp_path, "Awards", ("row-1",)),
+        outputs=OutputOptions(
+            False, False, True, tmp_path, "Awards", ("row-1",),
+            PrintSettings(Decimal("612"), Decimal("792"), "portrait"),
+        ),
     )
 
     workspace._generation_finished(BatchResult(BatchState.PUBLISHED, output, 1))

@@ -17,6 +17,8 @@ from certificate_automation.importers.delimited import import_delimited
 from certificate_automation.importers.excel import import_excel, inspect_excel
 from certificate_automation.mapping import ColumnValue, MappingPlan
 from certificate_automation.output_options import OutputOptions
+from certificate_automation.print_readiness import PrintSettings
+from decimal import Decimal
 from certificate_automation.template import inspect_template
 from certificate_automation.word import WordPdfConverter
 
@@ -88,7 +90,8 @@ def test_real_word_publishes_verified_50_recipient_mixed_script_batch(tmp_path):
             "CERTIFICATE_ID": ColumnValue("certificate_id"),
         }
     )
-    options = OutputOptions(True, True, True, tmp_path, "All Certificates", dataset.order)
+    print_settings = PrintSettings(Decimal("792"), Decimal("612"), "landscape")
+    options = OutputOptions(True, True, True, tmp_path, "All Certificates", dataset.order, print_settings)
 
     frozen_input = ApprovalInput(
         project_revision=1,
@@ -102,7 +105,7 @@ def test_real_word_publishes_verified_50_recipient_mixed_script_batch(tmp_path):
         warning_codes=(),
         warning_ack_digest=None,
         outputs=options.to_json(),
-        print_settings={},
+        print_settings=print_settings.to_json(),
         word_available=True,
         converter_identity="WordPdfConverter",
         locale="en",

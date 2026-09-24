@@ -212,6 +212,8 @@ def test_original_workbook_and_template_are_never_modified(batch_request):
 
 
 def _typed_request(tmp_path, docx_factory, *, approved=True, **selected):
+    from decimal import Decimal
+    from certificate_automation.print_readiness import PrintSettings
     template_path = docx_factory(paragraph_runs=[["Certificate for {{FULL_NAME}}"]])
     template = inspect_template(template_path)
     dataset = TabularDataset(
@@ -241,6 +243,8 @@ def _typed_request(tmp_path, docx_factory, *, approved=True, **selected):
         destination,
         "Awards",
         dataset.order,
+        PrintSettings(Decimal("612"), Decimal("792"), "portrait")
+        if selected.get("combined_pdf", True) else None,
     )
     plan = MappingPlan({"FULL_NAME": ColumnValue("full_name")})
     if not approved:
@@ -248,7 +252,9 @@ def _typed_request(tmp_path, docx_factory, *, approved=True, **selected):
     inputs = ApprovalInput(
         1, dataset.revision, dataset.canonical_sha256(), dataset.source.sha256,
         template.sha256, plan.to_json(), {"reviewed": True}, ("preview",), (),
-        None, outputs.to_json(), {}, True, "FakeConverter", "zh_CN", len(outputs.row_ids),
+        None, outputs.to_json(),
+        outputs.print_settings.to_json() if outputs.print_settings is not None else {},
+        True, "FakeConverter", "zh_CN", len(outputs.row_ids),
         0, {"docx": len(outputs.row_ids) if outputs.docx else 0,
             "pdf": len(outputs.row_ids) if outputs.individual_pdf else 0,
             "combined": int(outputs.combined_pdf)},
@@ -265,6 +271,22 @@ def test_typed_generation_requires_verified_workflow_approval(tmp_path, docx_fac
     with pytest.raises(BatchGenerationError) as caught:
         _generator(FakeConverter()).generate(request)
     assert caught.value.code == "approval.required"
+    assert not list(request.destination.glob(".certificate-incomplete-*"))
+
+
+def test_typed_generation_rejects_missing_print_settings_before_staging(tmp_path, docx_factory):
+    from dataclasses import replace
+    basic = _typed_request(tmp_path, docx_factory)
+    object.__setattr__(basic.outputs, "print_settings", None)
+    frozen = replace(basic.approval_input, outputs=basic.outputs.to_json(), print_settings={})
+    approval = ApprovalService.freeze(frozen, "Preparer")
+    request = replace(basic, approval_input=frozen, approval=approval,
+                      approval_digest=approval.snapshot.digest)
+
+    with pytest.raises(BatchGenerationError) as caught:
+        _generator(FakeConverter()).generate(request)
+
+    assert caught.value.code == "output.print_settings_required"
     assert not list(request.destination.glob(".certificate-incomplete-*"))
 
 

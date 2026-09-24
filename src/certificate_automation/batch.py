@@ -41,7 +41,7 @@ from certificate_automation.pdf_merge import (
     CombinedPdfRecord,
     merge_verified_pdfs,
 )
-from certificate_automation.print_readiness import PrintReadinessService
+from certificate_automation.print_readiness import PrintReadinessService, PrintSettings
 from certificate_automation.template import TemplateInspection, render_template
 from certificate_automation.validation import validate_preflight
 from certificate_automation.verification import (
@@ -407,6 +407,17 @@ class BatchGenerator:
         assert isinstance(dataset, TabularDataset)
         assert isinstance(plan, MappingPlan)
         assert isinstance(outputs, OutputOptions)
+
+        if outputs.combined_pdf:
+            try:
+                if not isinstance(outputs.print_settings, PrintSettings):
+                    raise ValueError("print.settings_invalid")
+                PrintSettings.from_json(outputs.print_settings.to_json())
+            except (ValueError, TypeError, KeyError, AttributeError, ArithmeticError) as error:
+                raise BatchGenerationError(
+                    "Approved page size is required for a combined PDF.",
+                    code="output.print_settings_required",
+                ) from error
 
         verification = ApprovalService.verify(request.approval, request.approval_input) if request.approval_input is not None else None
         if verification is None or not verification.valid or request.approval_digest != request.approval.snapshot.digest:
@@ -778,7 +789,7 @@ class BatchGenerator:
                     "The staged revision failed its integrity check.",
                     code="integrity.staging_failed",
                 )
-            if outputs.combined_pdf and outputs.print_settings is not None:
+            if outputs.combined_pdf:
                 readiness = PrintReadinessService().verify(
                     staging, outputs.print_settings, allow_ready=True,
                 )

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+import errno
 import json
 import os
 from pathlib import Path
 import shutil
 from typing import Literal, Mapping
+from uuid import uuid4
 
 from pypdf import PdfReader
 
@@ -218,6 +220,37 @@ class ExportResult:
     exported_copy: Path
 
 
+def _fsync_directory(path: Path) -> None:
+    """Flush staging directory entries where the OS supports directory fsync."""
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _rename_no_replace(source: Path, destination: Path) -> None:
+    """Publish a verified copy atomically, refusing a concurrently created target."""
+    if os.name == "nt":
+        os.rename(source, destination)  # Windows rename refuses an existing destination.
+        return
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise ExportError("export.atomic_unavailable")
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    if renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1) != 0:
+        error_number = ctypes.get_errno()
+        if error_number in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP}:
+            raise ExportError("export.atomic_unavailable")
+        raise OSError(error_number, os.strerror(error_number), str(destination))
+
+
 class ExportService:
     def __init__(self, integrity: IntegrityService | None = None) -> None:
         self._integrity = integrity or IntegrityService()
@@ -227,6 +260,7 @@ class ExportService:
         destination = Path(destination)
         if not self._integrity.verify_revision(source).valid:
             raise ExportError("export.source_invalid")
+        temporary: Path | None = None
         try:
             local = source.resolve(strict=True)
             destination_root = destination.resolve()
@@ -239,20 +273,34 @@ class ExportService:
                 item.name: sha256_file(item) for item in source.iterdir() if item.is_file() and not item.is_symlink()
             }
             destination.mkdir(parents=True, exist_ok=True)
-            target.mkdir(exist_ok=False)
+            candidate = destination / f".certificate-export-{uuid4().hex[:16]}"
+            candidate.mkdir(mode=0o700, exist_ok=False)
+            temporary = candidate
             for name, digest in originals.items():
-                with (source / name).open("rb") as original, (target / name).open("xb") as copied:
+                with (source / name).open("rb") as original, (temporary / name).open("xb") as copied:
                     shutil.copyfileobj(original, copied, length=1024 * 1024)
                     copied.flush()
                     os.fsync(copied.fileno())
-                if sha256_file(target / name) != digest or sha256_file(source / name) != digest:
+                if sha256_file(temporary / name) != digest or sha256_file(source / name) != digest:
                     raise ExportError("export.copy_changed")
-            if not self._integrity.verify_revision(source).valid or not self._integrity.verify_revision(target).valid:
+            if not self._integrity.verify_revision(source).valid or not self._integrity.verify_revision(
+                temporary, allow_ready=True,
+            ).valid:
                 raise ExportError("export.copy_changed")
-            if {item.name: sha256_file(item) for item in target.iterdir()} != originals:
+            if {item.name: sha256_file(item) for item in temporary.iterdir()} != originals:
                 raise ExportError("export.copy_changed")
+            _fsync_directory(temporary)
+            _fsync_directory(destination)
+            _rename_no_replace(temporary, target)
+            temporary = None
             return ExportResult(local, target)
         except ExportError:
             raise
         except (OSError, ValueError) as error:
+            if isinstance(error, FileExistsError):
+                raise ExportError("export.destination_exists") from error
             raise ExportError("export.copy_failed") from error
+        finally:
+            if temporary is not None and temporary.is_dir() and not temporary.is_symlink():
+                if temporary.parent.resolve() == destination.resolve():
+                    shutil.rmtree(temporary)
