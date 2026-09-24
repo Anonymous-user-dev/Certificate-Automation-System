@@ -1,4 +1,5 @@
 from contextlib import closing
+from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -121,7 +122,10 @@ def test_corrupt_revision_hash_is_rejected(tmp_path):
 
 
 def test_changed_template_hash_invalidates_all_downstream_state(tmp_path):
-    state = _state(tmp_path, template_hash=sha256(b"old template").hexdigest())
+    state = replace(
+        _state(tmp_path, template_hash=sha256(b"old template").hexdigest()),
+        approval={"snapshot": {"digest": "a" * 64}},
+    )
     state.template_path.write_bytes(b"new template")
 
     reconciled = state.reconcile_template()
@@ -131,6 +135,7 @@ def test_changed_template_hash_invalidates_all_downstream_state(tmp_path):
     assert reconciled.mapping_plan is None
     assert reconciled.preview_revision is None
     assert reconciled.acknowledgements == ()
+    assert reconciled.approval is None
     assert reconciled.active_step == "template"
 
 

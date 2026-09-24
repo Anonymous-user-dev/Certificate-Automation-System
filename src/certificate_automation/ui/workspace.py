@@ -34,6 +34,8 @@ from PySide6.QtWidgets import (
 )
 
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
+from certificate_automation.approval import ApprovalInput, ApprovalService, WorkflowApproval
+from certificate_automation.domain import Severity
 from certificate_automation.batch import BatchRequest, CancellationToken
 from certificate_automation.i18n import CatalogError, CatalogSet, SUPPORTED_LOCALES, package_root
 from certificate_automation.mapping import MappingPlan, evaluate_plan
@@ -50,6 +52,7 @@ from certificate_automation.ui.project_home_page import ProjectHomePage
 from certificate_automation.ui.data_page import DataPage, ImportPreviewDialog
 from certificate_automation.ui.match_page import MatchPage
 from certificate_automation.ui.output_page import OutputPage
+from certificate_automation.ui.approval_page import ApprovalPage
 from certificate_automation.ui.results_page import ResultsPage
 from certificate_automation.ui.review_page import ReviewPage
 from certificate_automation.ui.template_page import TemplatePage
@@ -58,7 +61,7 @@ from certificate_automation.ui.theme import application_stylesheet
 from certificate_automation.ui.worker import GenerationWorker
 
 
-STEP_IDS = ("data", "template", "template_health", "mapping", "review", "output", "generate")
+STEP_IDS = ("data", "template", "template_health", "mapping", "review", "output", "approval", "generate")
 STEP_KEYS = {
     "data": "nav.data",
     "template": "nav.template",
@@ -66,6 +69,7 @@ STEP_KEYS = {
     "mapping": "nav.mapping",
     "review": "nav.review",
     "output": "nav.output",
+    "approval": "nav.approval",
     "generate": "nav.generate",
 }
 
@@ -214,6 +218,10 @@ class WorkspaceWindow(QMainWindow):
         self._restoring_mapping = False
         self._loaded_project: ProjectState | None = None
         self._layout_review_key: str | None = None
+        self._approval: WorkflowApproval | None = None
+        self._reviewer_reopened = False
+        self._reviewer_previews_seen = False
+        self._reviewer_preview_mode = False
         self.template_health_service = getattr(services, "template_health_service", None) or TemplateHealthService(
             getattr(getattr(services, "preview_service", None), "_converter", None)
         )
@@ -273,6 +281,17 @@ class WorkspaceWindow(QMainWindow):
         self.review_page.policy_changed.connect(self._policy_changed)
         self.review_page.preview_requested.connect(self._generate_preview)
         self.output_page.options_accepted.connect(self._accept_outputs)
+        for control in (self.output_page.docx, self.output_page.individual_pdf,
+                        self.output_page.combined_pdf):
+            control.toggled.connect(self._output_settings_changed)
+        for control in (self.output_page.destination, self.output_page.batch_name):
+            control.textChanged.connect(self._output_settings_changed)
+        self.template_health_page.expected_pages.valueChanged.connect(self._layout_settings_changed)
+        self.approval_page.freeze_requested.connect(self._freeze_approval)
+        self.approval_page.two_person_mode_changed.connect(self._approval_mode_changed)
+        self.approval_page.review_requested.connect(self._review_approval)
+        self.approval_page.review_previews_requested.connect(self._start_reviewer_preview_review)
+        self.approval_page.generate_requested.connect(self.start_generation)
         self.results_page.generate_requested.connect(self.start_generation)
         self.results_page.cancel_requested.connect(self._request_cancel)
         self.results_page.open_output_requested.connect(self._open_published_output)
@@ -348,6 +367,7 @@ class WorkspaceWindow(QMainWindow):
         self.match_page = MatchPage(self.catalogs)
         self.review_page = ReviewPage(self.catalogs)
         self.output_page = OutputPage(self.catalogs)
+        self.approval_page = ApprovalPage(self.catalogs)
         self.results_page = ResultsPage(self.catalogs)
         pages = {
             "template": self.template_page,
@@ -355,6 +375,7 @@ class WorkspaceWindow(QMainWindow):
             "mapping": self.match_page,
             "review": self.review_page,
             "output": self.output_page,
+            "approval": self.approval_page,
             "generate": self.results_page,
         }
         for step, page in pages.items():
@@ -407,6 +428,10 @@ class WorkspaceWindow(QMainWindow):
         self.data_page.set_dataset(dataset)
         self.state = WorkspaceState(current_step="data", project_path=Path(path) if path else None)
         self.project_state = OperatorProjectState(dataset=dataset)
+        self._approval = None
+        self._reviewer_reopened = False
+        self._reviewer_previews_seen = False
+        self._reviewer_preview_mode = False
         self._layout_review_key = None
         self._reset_workflow_pages(dataset)
         if store is not None:
@@ -442,6 +467,17 @@ class WorkspaceWindow(QMainWindow):
         finally:
             self._hydrating_project = False
         self.project_state = restored
+        self._approval = None
+        self._reviewer_reopened = True
+        self._reviewer_previews_seen = False
+        self._reviewer_preview_mode = False
+        if project.approval is not None:
+            try:
+                self._approval = WorkflowApproval.from_json(project.approval)
+            except (ValueError, TypeError, KeyError, OverflowError):
+                self._approval = None
+                project = replace(project, approval=None)
+                self._loaded_project = project
         self._layout_review_key = (
             str(project.layout_review.get("revision_key"))
             if project.layout_review and restored.template is not None and restored.plan is not None
@@ -454,6 +490,10 @@ class WorkspaceWindow(QMainWindow):
             self.template_health_page.set_structure(
                 self.template_health_service.inspect_structure(restored.template.path)
             )
+            if project.layout_review and project.layout_review.get("expected_pages"):
+                self.template_health_page.expected_pages.setValue(
+                    int(project.layout_review["expected_pages"])
+                )
         self.match_page.set_context(
             project.dataset,
             restored.template.names if restored.template is not None else (),
@@ -498,6 +538,8 @@ class WorkspaceWindow(QMainWindow):
                 self._set_save_state(SaveState.SAVING)
         self.root_stack.setCurrentWidget(self.workspace_surface)
         self._show_step(self.state.current_step)
+        if self.project_state.outputs is not None:
+            self._refresh_approval_page()
         self._update_migration_status()
 
     def _reset_workflow_pages(self, dataset: TabularDataset) -> None:
@@ -509,6 +551,7 @@ class WorkspaceWindow(QMainWindow):
         self.output_page.reset_options()
         self.results_page.set_ready()
         self.results_page.generate_button.setEnabled(False)
+        self.approval_page.clear()
 
     def _restore_project_state(
         self, project: ProjectState
@@ -567,10 +610,10 @@ class WorkspaceWindow(QMainWindow):
                 if set(options.row_ids) != set(project.dataset.order) or not options.destination.is_dir():
                     raise ValueError("output order changed")
                 restored = replace(restored, outputs=options)
-                maximum = "generate"
+                maximum = "approval" if project.approval is None else "generate"
             except Exception:
                 repair_code = "project.resume_output_repair"
-        elif restored.plan is not None and project.active_step == "generate":
+        elif restored.plan is not None and project.active_step in {"approval", "generate"}:
             repair_code = "project.resume_output_repair"
         if restored.template is not None and restored.plan is not None:
             expected_key = self.template_health_service.revision_key(
@@ -678,6 +721,13 @@ class WorkspaceWindow(QMainWindow):
         )
         for control in (*data_controls, *template_controls, *health_controls, *review_controls, *output_controls):
             control.setEnabled(not read_only)
+        for control in (
+            self.approval_page.preparer_name, self.approval_page.two_person,
+            self.approval_page.freeze_button, self.approval_page.reviewer_name,
+            self.approval_page.review_previews_button, self.approval_page.review_button,
+            self.approval_page.generate_button,
+        ):
+            control.setEnabled(not read_only)
         for card in self.match_page.cards.values():
             for control in (
                 card.type_combo, card.column_combo, card.fixed_input,
@@ -694,7 +744,7 @@ class WorkspaceWindow(QMainWindow):
         self.match_page.save_profile_button.setEnabled(not read_only)
         self.match_page.apply_profile_button.setEnabled(not read_only)
         self.results_page.generate_button.setEnabled(
-            not read_only and self.project_state.outputs is not None
+            not read_only and self._approval is not None
         )
         self.results_page.cancel_button.setEnabled(False if read_only else self.results_page.cancel_button.isEnabled())
         if not read_only:
@@ -767,6 +817,8 @@ class WorkspaceWindow(QMainWindow):
         self._set_save_state(SaveState.SAVING)
 
     def set_locale(self, locale: str) -> None:
+        if locale != self.catalogs.locale and self._approval is not None:
+            self._invalidate_approval()
         self.catalogs.set_locale(locale)
         self.settings.setValue("locale", self.catalogs.locale)
         if (
@@ -885,8 +937,11 @@ class WorkspaceWindow(QMainWindow):
         self.back_button.setEnabled(index > 0)
         self.next_button.setEnabled(index < len(STEP_IDS) - 1)
         if changed and self.coordinator is not None:
-            self.state = replace(self.state, project_revision=self.state.project_revision + 1)
+            if self._approval is None:
+                self.state = replace(self.state, project_revision=self.state.project_revision + 1)
             self._mark_project_dirty()
+        if step == "approval" and self.project_state.outputs is not None:
+            self._refresh_approval_page()
 
     def _accept_data(self, _dataset: TabularDataset) -> None:
         if self._read_only:
@@ -1084,6 +1139,7 @@ class WorkspaceWindow(QMainWindow):
             warning_ack_digest=None,
         )
         self._layout_review_key = None
+        self._invalidate_approval()
         self.template_health_page.clear_layout()
         self.template_health_service.clear()
         self.state = replace(
@@ -1163,6 +1219,7 @@ class WorkspaceWindow(QMainWindow):
     def _accept_template(self, inspection) -> None:
         if self._read_only:
             return
+        self._invalidate_approval()
         self.project_state = replace(
             self.project_state,
             template=inspection,
@@ -1205,6 +1262,7 @@ class WorkspaceWindow(QMainWindow):
     def _accept_plan(self, plan: MappingPlan) -> None:
         if self._read_only:
             return
+        self._invalidate_approval()
         self.project_state = replace(
             self.project_state,
             plan=plan,
@@ -1262,6 +1320,23 @@ class WorkspaceWindow(QMainWindow):
         )
         if revision_key != expected_key or not self.template_health_page.mark_reviewed_button.isEnabled():
             return
+        if self._reviewer_preview_mode:
+            report = self._review_report()
+            try:
+                inputs = self._current_approval_input(report)
+            except (ValueError, OSError, TypeError):
+                self._reviewer_preview_mode = False
+                self.banner.show_issue("approval.stale", self.catalogs.text("approval.stale"))
+                return
+            if self._approval is None or self._approval.snapshot != ApprovalService.snapshot(inputs, two_person=True):
+                self._reviewer_preview_mode = False
+                self.banner.show_issue("approval.stale", self.catalogs.text("approval.stale"))
+                return
+            self._reviewer_previews_seen = True
+            self._reviewer_preview_mode = False
+            self._show_step("approval")
+            return
+        self._invalidate_approval()
         self._layout_review_key = revision_key
         if self._loaded_project is not None:
             self._loaded_project = replace(
@@ -1280,6 +1355,7 @@ class WorkspaceWindow(QMainWindow):
         self.navigate("review")
 
     def _invalidate_mapping_review(self, *, preserve_plan: bool = False) -> None:
+        self._invalidate_approval()
         previous_plan = self.project_state.plan if preserve_plan else None
         self.project_state = replace(
             self.project_state, plan=previous_plan, outputs=None,
@@ -1427,13 +1503,14 @@ class WorkspaceWindow(QMainWindow):
     def _accept_outputs(self, outputs: OutputOptions) -> None:
         if self._read_only:
             return
+        self._invalidate_approval()
         self.project_state = replace(self.project_state, outputs=outputs)
         self.results_page.set_expected_combined(outputs.combined_pdf)
-        self.results_page.generate_button.setEnabled(True)
+        self.results_page.generate_button.setEnabled(False)
         self.state = replace(self.state, project_revision=self.state.project_revision + 1)
         self._mark_project_dirty()
         self.mark_step_complete("output")
-        self.navigate("generate")
+        self.navigate("approval")
 
     def _focus_issue(self, row_id: str, column_id: str) -> None:
         self._show_step("data")
@@ -1447,6 +1524,8 @@ class WorkspaceWindow(QMainWindow):
         if report is not None:
             self.review_page.set_issues(report.issues)
         digest = report.warning_digest if report is not None and report.ready else None
+        if digest != self.project_state.warning_ack_digest:
+            self._invalidate_approval()
         self.project_state = replace(
             self.project_state,
             warning_ack_revision=dataset.revision if dataset else None,
@@ -1460,6 +1539,7 @@ class WorkspaceWindow(QMainWindow):
     def _policy_changed(self, policy: DuplicatePolicy) -> None:
         if self._read_only or policy == self.project_state.duplicate_policy:
             return
+        self._invalidate_approval()
         self.project_state = replace(
             self.project_state, duplicate_policy=policy,
             warning_ack_revision=None, warning_ack_digest=None,
@@ -1482,6 +1562,213 @@ class WorkspaceWindow(QMainWindow):
             duplicate_policy=current.duplicate_policy,
             history_index=getattr(self.services, "history_index", None),
         )
+
+    def _invalidate_approval(self) -> None:
+        self._approval = None
+        self._reviewer_reopened = False
+        self._reviewer_previews_seen = False
+        self._reviewer_preview_mode = False
+        self.approval_page.set_approval(None)
+        self.results_page.generate_button.setEnabled(False)
+        if self._loaded_project is not None and self._loaded_project.approval is not None:
+            self._loaded_project = replace(self._loaded_project, approval=None)
+
+    def _approval_mode_changed(self, two_person: bool) -> None:
+        if self._approval is None or self._approval.two_person == two_person:
+            return
+        self._invalidate_approval()
+        self.state = replace(
+            self.state,
+            completed_steps=tuple(step for step in self.state.completed_steps
+                                  if step not in {"approval", "generate"}),
+            project_revision=self.state.project_revision + 1,
+        )
+        self._mark_project_dirty()
+
+    def _drop_stale_approval(self) -> None:
+        if self._approval is None:
+            return
+        self._invalidate_approval()
+        self.state = replace(
+            self.state,
+            completed_steps=tuple(step for step in self.state.completed_steps
+                                  if step not in {"approval", "generate"}),
+            project_revision=self.state.project_revision + 1,
+        )
+        self._mark_project_dirty()
+
+    def _output_settings_changed(self, *_args) -> None:
+        if self._approval is None or self._restoring_mapping or self._hydrating_project:
+            return
+        self._invalidate_approval()
+        self.project_state = replace(self.project_state, outputs=None)
+        self.state = replace(
+            self.state,
+            completed_steps=tuple(step for step in self.state.completed_steps
+                                  if step not in {"output", "approval", "generate"}),
+            project_revision=self.state.project_revision + 1,
+        )
+        if self._loaded_project is not None:
+            self._loaded_project = replace(self._loaded_project, output_options=None)
+        self._mark_project_dirty()
+
+    def _layout_settings_changed(self, *_args) -> None:
+        if self._approval is None or self._restoring_mapping or self._hydrating_project or self._reviewer_preview_mode:
+            return
+        self._invalidate_approval()
+        self._layout_review_key = None
+        self.state = replace(self.state, project_revision=self.state.project_revision + 1)
+        if self._loaded_project is not None:
+            self._loaded_project = replace(self._loaded_project, layout_review=None)
+        self._mark_project_dirty()
+
+    def _current_approval_input(self, report: ValidationReport) -> ApprovalInput:
+        current = self.project_state
+        project = self._loaded_project
+        if not all((current.dataset, current.template, current.plan, current.outputs)) or project is None:
+            raise ValueError("approval.required")
+        if not report.ready or report.dataset_revision != current.dataset.revision:
+            raise ValueError("approval.stale")
+        if report.warning_digest and report.warning_digest != current.warning_ack_digest:
+            raise ValueError("review.warning_ack_required")
+        dataset, template, plan, outputs = (
+            current.dataset, current.template, current.plan, current.outputs
+        )
+        if sha256(template.path.read_bytes()).hexdigest() != template.sha256:
+            raise ValueError("validation.template_changed")
+        source_sha = dataset.source.sha256
+        if dataset.source.path is not None:
+            try:
+                if sha256(dataset.source.path.read_bytes()).hexdigest() != source_sha:
+                    raise ValueError("approval.source_changed")
+            except OSError as error:
+                raise ValueError("approval.source_changed") from error
+        layout = project.layout_review
+        expected_key = self.template_health_service.revision_key(dataset, template, plan)
+        if (
+            layout is None or layout.get("revision_key") != expected_key
+            or self._layout_review_key != expected_key
+            or not layout.get("preview_hashes")
+        ):
+            raise ValueError("template.layout_review_required")
+        warnings = tuple(sorted(issue.code for issue in report.issues if issue.severity is Severity.WARNING))
+        availability = getattr(self.services, "word_availability", None)
+        try:
+            word_available = bool(availability().available) if callable(availability) else False
+        except Exception:
+            word_available = False
+        if (outputs.individual_pdf or outputs.combined_pdf) and not word_available:
+            raise ValueError("word.not_available")
+        converter = getattr(getattr(self.services, "batch_generator", None), "_converter", None)
+        converter_identity = type(converter).__name__ if converter is not None else "Microsoft Word"
+        selected = len(outputs.row_ids)
+        per_certificate_pages = int(layout.get("expected_pages", 1))
+        return ApprovalInput(
+            project_revision=self.state.project_revision,
+            dataset_revision=dataset.revision,
+            dataset_sha256=dataset.canonical_sha256(),
+            source_sha256=source_sha,
+            template_sha256=template.sha256,
+            mapping=plan.to_json(),
+            health_review=dict(layout),
+            preview_hashes=tuple(str(value) for value in layout["preview_hashes"]),
+            warning_codes=warnings,
+            warning_ack_digest=report.warning_digest or None,
+            outputs=outputs.to_json(),
+            print_settings=dict(project.print_settings or {}),
+            word_available=word_available,
+            converter_identity=converter_identity,
+            locale=self.catalogs.locale,
+            recipient_count=selected,
+            excluded_count=len(dataset.rows) - selected,
+            output_counts={
+                "docx": selected if outputs.docx else 0,
+                "pdf": selected if outputs.individual_pdf else 0,
+                "combined": 1 if outputs.combined_pdf else 0,
+                "separator": 0,
+                "manifest": 1,
+                "report": 1,
+            },
+            expected_pages=(selected * per_certificate_pages if outputs.combined_pdf else 0),
+            destination=str(outputs.destination.resolve()),
+            proposed_revision_folder=self.catalogs.text("approval.revision_pending"),
+            template_name=template.path.name,
+        )
+
+    def _refresh_approval_page(self) -> None:
+        report = self._review_report()
+        if report is None:
+            self.approval_page.clear()
+            return
+        try:
+            inputs = self._current_approval_input(report)
+        except (ValueError, OSError) as error:
+            self._drop_stale_approval()
+            self.approval_page.clear()
+            code = str(error)
+            if code in {"approval.source_changed", "approval.stale", "validation.template_changed", "template.layout_review_required", "word.not_available", "review.warning_ack_required"}:
+                self.banner.show_issue(code, self.catalogs.text(code))
+            return
+        self.approval_page.set_summary(
+            inputs,
+            warnings_acknowledged=(not report.warning_digest or report.warning_digest == self.project_state.warning_ack_digest),
+            reviewer_previews_reviewed=self._reviewer_previews_seen,
+        )
+        self.approval_page.set_approval(self._approval, allow_review=self._reviewer_reopened)
+
+    def _freeze_approval(self, preparer_name: str, two_person: bool) -> None:
+        if self._read_only:
+            return
+        report = self._review_report()
+        if report is None:
+            return
+        try:
+            inputs = self._current_approval_input(report)
+            approved = ApprovalService.freeze(inputs, preparer_name, two_person=two_person)
+        except (ValueError, OSError) as error:
+            self._drop_stale_approval()
+            code = str(error)
+            self.banner.show_issue(code, self.catalogs.text(code))
+            return
+        self._approval = approved
+        self._reviewer_reopened = False
+        self._loaded_project = replace(self._loaded_project, approval=approved.to_json())
+        self._mark_project_dirty()
+        self.approval_page.set_approval(approved, allow_review=False)
+        self.banner.clear()
+
+    def _review_approval(self, reviewer_name: str) -> None:
+        if self._read_only or not self._reviewer_reopened or not self._reviewer_previews_seen or self._approval is None:
+            return
+        report = self._review_report()
+        if report is None:
+            return
+        try:
+            inputs = self._current_approval_input(report)
+            approved = ApprovalService.review(self._approval, inputs, reviewer_name)
+        except (ValueError, OSError) as error:
+            code = str(error)
+            self.banner.show_issue(code, self.catalogs.text(code))
+            return
+        self._approval = approved
+        self._loaded_project = replace(self._loaded_project, approval=approved.to_json())
+        self._mark_project_dirty()
+        self.approval_page.set_approval(approved, allow_review=True)
+        self.banner.clear()
+
+    def _start_reviewer_preview_review(self) -> None:
+        if self._read_only or not self._reviewer_reopened or self._approval is None or not self._approval.two_person:
+            return
+        layout = self._loaded_project.layout_review if self._loaded_project else None
+        if layout is None:
+            self.banner.show_issue("approval.stale", self.catalogs.text("approval.stale"))
+            return
+        self._reviewer_previews_seen = False
+        self._reviewer_preview_mode = True
+        expected_pages = int(layout.get("expected_pages", 1))
+        self.template_health_page.expected_pages.setValue(expected_pages)
+        self._render_layout_review(expected_pages)
+        self._show_step("template_health")
 
     def _generate_preview(self, row_id: str) -> None:
         current = self.project_state
@@ -1580,6 +1867,22 @@ class WorkspaceWindow(QMainWindow):
             self.banner.show_issue(code, self.catalogs.text(code))
             self._show_step("review")
             return
+        try:
+            approval_input = self._current_approval_input(report)
+        except (ValueError, OSError) as error:
+            code = str(error)
+            self.banner.show_issue(code, self.catalogs.text(code))
+            self._show_step("approval")
+            return
+        approval_check = ApprovalService.verify(self._approval, approval_input)
+        if not approval_check.valid:
+            if approval_check.code == "approval.stale":
+                self._drop_stale_approval()
+            self.banner.show_issue(
+                approval_check.code, self.catalogs.text(approval_check.code)
+            )
+            self._show_step("approval")
+            return
         request = BatchRequest(
             current.dataset,
             current.template,
@@ -1590,6 +1893,8 @@ class WorkspaceWindow(QMainWindow):
             history_index=getattr(self.services, "history_index", None),
             warning_ack_digest=current.warning_ack_digest,
         )
+        self.mark_step_complete("approval")
+        self.navigate("generate")
         self.cancellation = CancellationToken()
         self.results_page.set_running()
         thread = QThread(self)

@@ -113,7 +113,9 @@ class ProjectState:
             template_inspection=None,
             layout_review=None,
             mapping_plan=None,
+            output_options=None,
             acknowledgements=(),
+            approval=None,
             active_step="template",
             preview_revision=None,
         )

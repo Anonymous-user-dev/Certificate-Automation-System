@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QAbstractButton, QAbstractItemView, QComboBox, QLi
 import pytest
 
 from certificate_automation.i18n import CatalogSet, package_root
+from certificate_automation.approval import ApprovalService
 from certificate_automation.dataset import Column, DataRow, TabularDataset
 from certificate_automation.domain import BatchResult, BatchState
 from certificate_automation.output_options import OutputOptions
@@ -21,6 +22,7 @@ from certificate_automation.mapping import ColumnValue, FixedValue, JoinValue, M
 from certificate_automation.profiles import MappingProfile, ProfileStore
 from certificate_automation.ui.workspace import WorkspaceWindow
 from certificate_automation.ui.workspace import SaveState
+from certificate_automation.ui.workspace import STEP_IDS
 from certificate_automation.project import ProjectCorruptError, ProjectError, ProjectSaveError, ProjectState, ProjectStore
 from certificate_automation.validation import ValidationReport
 from certificate_automation.word import WordAvailability
@@ -167,6 +169,197 @@ def workspace(qtbot, tmp_path):
 
 def test_home_has_four_clear_primary_actions(workspace):
     assert all(button.isVisible() for button in workspace.home.primary_buttons())
+
+
+def test_output_step_opens_final_approval_before_results(workspace, tmp_path):
+    workspace.new_project(tmp_path / "Approval.certproject")
+    workspace.state = replace(
+        workspace.state,
+        completed_steps=STEP_IDS[:STEP_IDS.index("output")],
+    )
+    options = OutputOptions(True, False, False, tmp_path, "Awards", workspace.project_state.dataset.order)
+
+    workspace._accept_outputs(options)
+
+    assert workspace.current_step == "approval"
+    assert workspace.page_stack.currentWidget() is workspace.approval_page
+    assert not workspace.results_page.generate_button.isEnabled()
+
+
+def test_generation_without_current_frozen_approval_never_starts(workspace, tmp_path, docx_factory):
+    workspace.new_project(tmp_path / "Unapproved.certproject")
+    template = inspect_template(docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    plan = MappingPlan({"FULL_NAME": ColumnValue("column-1")})
+    dataset = workspace.project_state.dataset.with_cell("row-1", "column-1", "Ana")
+    workspace.project_state = replace(
+        workspace.project_state,
+        dataset=dataset, template=template, plan=plan,
+        outputs=OutputOptions(True, False, False, tmp_path, "Awards", dataset.order),
+    )
+    workspace._layout_review_key = TemplateHealthService.revision_key(dataset, template, plan)
+    workspace._loaded_project = replace(
+        workspace._loaded_project,
+        layout_review={"revision_key": workspace._layout_review_key,
+                       "preview_hashes": ["a" * 64], "expected_pages": 1},
+    )
+    workspace.services.validate = lambda *_args: ValidationReport(
+        (), {}, 0, dataset.revision, template.sha256,
+    )
+
+    workspace.start_generation()
+
+    assert workspace._thread is None
+    assert workspace.banner.issue_code == "approval.required"
+
+
+def _ready_approval_workspace(workspace, tmp_path, docx_factory):
+    project_path = tmp_path / "Ready approval.certproject"
+    workspace.new_project(project_path)
+    dataset = workspace.project_state.dataset.with_cell("row-1", "column-1", "Ana")
+    template = inspect_template(docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    plan = MappingPlan({"FULL_NAME": ColumnValue("column-1")})
+    workspace.project_state = replace(
+        workspace.project_state, dataset=dataset, template=template, plan=plan,
+    )
+    key = TemplateHealthService.revision_key(dataset, template, plan)
+    workspace._layout_review_key = key
+    workspace._loaded_project = replace(
+        workspace._loaded_project,
+        dataset=dataset,
+        template_path=template.path,
+        template_sha256=template.sha256,
+        template_inspection={"sha256": template.sha256, "names": ["FULL_NAME"]},
+        mapping_plan=plan.to_json(),
+        layout_review={"revision_key": key, "preview_hashes": ["a" * 64], "expected_pages": 1},
+    )
+    workspace.state = replace(
+        workspace.state, completed_steps=STEP_IDS[:STEP_IDS.index("output")],
+    )
+    workspace._accept_outputs(OutputOptions(True, False, False, tmp_path, "Awards", dataset.order))
+    return project_path
+
+
+def test_two_person_freeze_requires_project_reopen_and_survives_disk_roundtrip(
+    workspace, tmp_path, docx_factory
+):
+    path = _ready_approval_workspace(workspace, tmp_path, docx_factory)
+    assert workspace.current_step == "approval"
+    page = workspace.approval_page
+    page.preparer_name.setText("Alice")
+    page.two_person.setChecked(True)
+    page.freeze_button.click()
+    assert not page.review_button.isEnabled()
+    assert not page.generate_button.isEnabled()
+    assert workspace.coordinator.flush()
+    assert ProjectStore.open(path).load().approval["preparer_name"] == "Alice"
+
+    workspace.load_project(path)
+    page = workspace.approval_page
+    assert workspace.current_step == "approval"
+    page.reviewer_name.setText("alice")
+    assert not page.review_button.isEnabled()
+    page.reviewer_name.setText("Bob")
+    assert not page.review_button.isEnabled()
+    class Converter:
+        def convert(self, _source, destination):
+            writer = PdfWriter()
+            writer.add_blank_page(width=612, height=792)
+            with destination.open("wb") as stream:
+                writer.write(stream)
+
+    workspace.template_health_service = TemplateHealthService(Converter(), tmp_path / "reviewer-previews")
+    page.review_previews_button.click()
+    assert workspace.current_step == "template_health"
+    assert workspace.template_health_page.layout_result.ready
+    assert workspace.template_health_page.mark_reviewed_button.isEnabled()
+    workspace.template_health_page.mark_reviewed_button.click()
+    assert workspace.current_step == "approval"
+    assert page.reviewer_name.text() == "Bob"
+    assert page._approval.snapshot == ApprovalService.snapshot(page._inputs, two_person=True)
+    assert page.review_button.isEnabled()
+    page.review_button.click()
+    assert page.generate_button.isEnabled()
+    assert workspace.coordinator.flush()
+    saved = ProjectStore.open(path).load()
+    assert saved.approval["reviewer_name"] == "Bob"
+    assert saved.approval["snapshot"]["digest"] == workspace._approval.snapshot.digest
+
+
+def test_output_change_clears_frozen_approval(workspace, tmp_path, docx_factory):
+    _ready_approval_workspace(workspace, tmp_path, docx_factory)
+    workspace.approval_page.preparer_name.setText("Alice")
+    workspace.approval_page.freeze_button.click()
+    assert workspace.approval_page.generate_button.isEnabled()
+
+    workspace._accept_outputs(OutputOptions(True, False, False, tmp_path, "Different", workspace.project_state.dataset.order))
+
+    assert workspace._approval is None
+    assert workspace._loaded_project.approval is None
+    assert not workspace.approval_page.generate_button.isEnabled()
+
+
+def test_changing_two_person_mode_clears_frozen_approval(workspace, tmp_path, docx_factory):
+    _ready_approval_workspace(workspace, tmp_path, docx_factory)
+    page = workspace.approval_page
+    page.preparer_name.setText("Alice")
+    page.freeze_button.click()
+    assert page.generate_button.isEnabled()
+
+    page.two_person.setChecked(True)
+
+    assert workspace._approval is None
+    assert workspace._loaded_project.approval is None
+    assert not page.generate_button.isEnabled()
+
+
+def test_editing_output_controls_immediately_clears_frozen_approval(workspace, tmp_path, docx_factory):
+    _ready_approval_workspace(workspace, tmp_path, docx_factory)
+    workspace.approval_page.preparer_name.setText("Alice")
+    workspace.approval_page.freeze_button.click()
+    workspace.navigate("output")
+
+    workspace.output_page.batch_name.setText("Corrected Awards")
+
+    assert workspace._approval is None
+    assert workspace.project_state.outputs is None
+    assert workspace._loaded_project.approval is None
+    assert not workspace.approval_page.generate_button.isEnabled()
+
+
+def test_changed_import_source_blocks_approved_generation(workspace, tmp_path, docx_factory):
+    project_path = _ready_approval_workspace(workspace, tmp_path, docx_factory)
+    source = tmp_path / "source.csv"
+    source.write_text("Ana", encoding="utf-8")
+    dataset = replace(
+        workspace.project_state.dataset,
+        source=replace(workspace.project_state.dataset.source,
+                       path=source, sha256=sha256(source.read_bytes()).hexdigest()),
+    )
+    key = TemplateHealthService.revision_key(
+        dataset, workspace.project_state.template, workspace.project_state.plan
+    )
+    workspace.project_state = replace(workspace.project_state, dataset=dataset)
+    workspace._layout_review_key = key
+    workspace._loaded_project = replace(
+        workspace._loaded_project, dataset=dataset,
+        layout_review={"revision_key": key, "preview_hashes": ["a" * 64], "expected_pages": 1},
+    )
+    workspace._refresh_approval_page()
+    workspace.approval_page.preparer_name.setText("Alice")
+    workspace.approval_page.freeze_button.click()
+    assert workspace.approval_page.generate_button.isEnabled()
+
+    source.write_text("Changed", encoding="utf-8")
+    workspace.start_generation()
+
+    assert workspace._thread is None
+    assert workspace.banner.issue_code == "approval.source_changed"
+    assert workspace.coordinator.flush()
+    workspace.load_project(project_path)
+    assert workspace.banner.issue_code == "approval.source_changed"
+    assert workspace._approval is None
+    assert workspace._loaded_project.approval is None
+    assert not workspace.approval_page.generate_button.isEnabled()
 
 
 def test_new_project_saves_real_edits_and_updates_status(workspace, qtbot, tmp_path):
@@ -330,7 +523,7 @@ def test_reopen_navigation_preserves_valid_review_facts_on_disk(
     reopened = ProjectStore.open(path).load()
 
     assert reopened.acknowledgements == original.acknowledgements
-    assert reopened.approval == original.approval
+    assert reopened.approval is None  # an unrecognized legacy approval cannot authorize generation
     assert reopened.preview_revision == original.preview_revision
     assert reopened.active_step == "output"
 
@@ -1008,6 +1201,22 @@ def test_active_generation_blocks_all_project_switch_routes_and_finishes_in_orig
         (), {}, 0, dataset.revision, template.sha256
     )
     workspace.services.batch_generator = WaitingGenerator()
+    reviewed_dataset = workspace.project_state.dataset.with_cell("row-1", "column-1", "Ana")
+    workspace.project_state = replace(workspace.project_state, dataset=reviewed_dataset)
+    workspace._layout_review_key = TemplateHealthService.revision_key(
+        reviewed_dataset, workspace.project_state.template, workspace.project_state.plan
+    )
+    workspace._loaded_project = replace(
+        workspace._loaded_project,
+        layout_review={"revision_key": workspace._layout_review_key,
+                       "preview_hashes": ["a" * 64], "expected_pages": 1},
+    )
+    workspace._approval = ApprovalService.freeze(
+        workspace._current_approval_input(workspace.services.validate(
+            reviewed_dataset, workspace.project_state.template,
+            workspace.project_state.plan, workspace.project_state.outputs,
+        )), "Ada",
+    )
     workspace.start_generation()
     qtbot.waitUntil(started.is_set, timeout=3000)
     monkeypatch.setattr(

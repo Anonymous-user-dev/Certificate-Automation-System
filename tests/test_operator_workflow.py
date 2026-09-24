@@ -89,6 +89,14 @@ def _finish_layout_review(window, qtbot):
     qtbot.mouseClick(window.template_health_page.mark_reviewed_button, Qt.MouseButton.LeftButton)
 
 
+def _approve_and_generate(window, qtbot):
+    assert window.current_step == "approval"
+    window.approval_page.preparer_name.setText("Batch preparer")
+    qtbot.mouseClick(window.approval_page.freeze_button, Qt.MouseButton.LeftButton)
+    assert window.approval_page.generate_button.isEnabled()
+    qtbot.mouseClick(window.approval_page.generate_button, Qt.MouseButton.LeftButton)
+
+
 @pytest.mark.parametrize("locale", ["en", "zh_CN", "ru"])
 def test_operator_can_complete_manual_combined_pdf_workflow(
     qtbot,
@@ -105,7 +113,7 @@ def test_operator_can_complete_manual_combined_pdf_workflow(
     qtbot.addWidget(window)
     window.show()
     window.set_locale(locale)
-    window.new_project()
+    window.new_project(tmp_path / f"{locale}-workflow.certproject")
     window.data_page.set_dataset(_dataset())
 
     qtbot.mouseClick(window.data_page.continue_button, Qt.MouseButton.LeftButton)
@@ -125,7 +133,7 @@ def test_operator_can_complete_manual_combined_pdf_workflow(
     window.output_page.destination.setText(str(destination))
     window.output_page.batch_name.setText("Awards")
     qtbot.mouseClick(window.output_page.continue_button, Qt.MouseButton.LeftButton)
-    qtbot.mouseClick(window.results_page.generate_button, Qt.MouseButton.LeftButton)
+    _approve_and_generate(window, qtbot)
 
     qtbot.waitUntil(lambda: window.results_page.state == "published")
     qtbot.waitUntil(lambda: window._thread is None)
@@ -159,7 +167,7 @@ def test_operator_combined_only_creates_ordered_pdf_and_opens_published_file(
     window = WorkspaceWindow(services)
     qtbot.addWidget(window)
     window.show()
-    window.new_project()
+    window.new_project(tmp_path / "combined-workflow.certproject")
     window.data_page.set_dataset(_dataset())
     qtbot.mouseClick(window.data_page.continue_button, Qt.MouseButton.LeftButton)
     window.template_page.set_inspection(inspect_template(template_path))
@@ -179,7 +187,7 @@ def test_operator_combined_only_creates_ordered_pdf_and_opens_published_file(
     window.output_page.destination.setText(str(destination))
     window.output_page.batch_name.setText("Awards")
     qtbot.mouseClick(window.output_page.continue_button, Qt.MouseButton.LeftButton)
-    qtbot.mouseClick(window.results_page.generate_button, Qt.MouseButton.LeftButton)
+    _approve_and_generate(window, qtbot)
 
     qtbot.waitUntil(lambda: window.results_page.state == "published", timeout=10000)
     qtbot.waitUntil(lambda: window._thread is None)
@@ -269,7 +277,7 @@ def test_operator_configures_history_check_and_must_acknowledge_unavailable_hist
     destination.mkdir()
     window.output_page.destination.setText(str(destination))
     qtbot.mouseClick(window.output_page.continue_button, Qt.MouseButton.LeftButton)
-    qtbot.mouseClick(window.results_page.generate_button, Qt.MouseButton.LeftButton)
+    _approve_and_generate(window, qtbot)
     qtbot.waitUntil(lambda: window.results_page.state == "published", timeout=10000)
     qtbot.waitUntil(lambda: window._thread is None)
     request = services.generator.requests[-1]
