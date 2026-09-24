@@ -305,6 +305,7 @@
   "history.unavailable": "无法检查以往批次是否有重复。请仔细核对本批次，并确认此警告后再继续。",
   "history.protection_unavailable": "当前 Windows 用户无法解锁本地重复记录，因此未检查以往批次。",
   "history.record_failed": "已完成的批次未能加入本地重复记录。",
+  "journal.durability_uncertain": "正式文件夹已存在且通过校验，但无法确认最后的保存已完成。请保留该文件夹，并在打印前进行完整性检查。",
   "history.clear_failed": "无法清除本地重复记录。",
   "history.invalid_policy": "保存的重复检查设置无效。请检查所选列。",
   "history.invalid_batch": "已完成批次的信息无效，无法加入记录。",

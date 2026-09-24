@@ -3,31 +3,39 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 from threading import Event
 from typing import Callable
 from uuid import uuid4
 
 from certificate_automation import __version__
+from certificate_automation.approval import ApprovalInput, ApprovalService, WorkflowApproval
 from certificate_automation.audit import (
     AuditContext,
     CombinedAuditOutput,
     AuditOutput,
     sha256_file,
+    pdf_page_fingerprints,
     write_manifest,
     write_support_log,
     write_summary,
 )
+from certificate_automation.batch_journal import BatchJournal, JournalState
 from certificate_automation.dataset import TabularDataset
-from certificate_automation.domain import BatchResult, BatchState, Severity
-from certificate_automation.history import DuplicatePolicy, HistoryIndex
+from certificate_automation.domain import BatchResult, BatchState, Issue, Severity
+from certificate_automation.history import DuplicatePolicy, HistoryEntry, HistoryIndex, PublishedBatch
+from certificate_automation.integrity import IntegrityService
+from certificate_automation.filenames import safe_stem
 from certificate_automation.mapping import MappingPlan, MappingSelection, evaluate_plan
 from certificate_automation.output_options import OutputOptions
+from certificate_automation.platform_report import PlatformReport
 from certificate_automation.pdf_merge import (
     CombinedPdfError,
     CombinedPdfRecord,
@@ -49,6 +57,41 @@ from certificate_automation.workbook import WorkbookData
 ProgressCallback = Callable[["ProgressEvent"], None]
 
 
+@contextmanager
+def _destination_lock(destination: Path):
+    """Hold one OS-level lock across revision selection and publication."""
+
+    destination.mkdir(parents=True, exist_ok=True)
+    lock_path = destination / ".official-batch.lock"
+    if lock_path.is_symlink():
+        raise BatchGenerationError("Unsafe destination lock.", code="output.destination_busy")
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    locked = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+            if os.fstat(descriptor).st_size == 0:
+                os.write(descriptor, b"\0")
+                os.fsync(descriptor)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        locked = True
+        yield
+    except (BlockingIOError, PermissionError) as error:
+        raise BatchGenerationError("The output folder is busy.", code="output.destination_busy") from error
+    finally:
+        if locked:
+            if os.name == "nt":
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class BatchRequest:
     dataset: WorkbookData | TabularDataset
@@ -59,6 +102,10 @@ class BatchRequest:
     duplicate_policy: DuplicatePolicy
     history_index: HistoryIndex | None
     warning_ack_digest: str | None
+    approval_input: ApprovalInput | None
+    approval: WorkflowApproval | None
+    approval_digest: str | None
+    revision_number: int | None
 
     def __init__(
         self,
@@ -71,6 +118,10 @@ class BatchRequest:
         duplicate_policy: DuplicatePolicy | None = None,
         history_index: HistoryIndex | None = None,
         warning_ack_digest: str | None = None,
+        approval_input: ApprovalInput | None = None,
+        approval: WorkflowApproval | None = None,
+        approval_digest: str | None = None,
+        revision_number: int | None = None,
     ) -> None:
         object.__setattr__(self, "dataset", dataset)
         object.__setattr__(self, "template", template)
@@ -80,6 +131,10 @@ class BatchRequest:
         object.__setattr__(self, "duplicate_policy", duplicate_policy or DuplicatePolicy())
         object.__setattr__(self, "history_index", history_index)
         object.__setattr__(self, "warning_ack_digest", warning_ack_digest)
+        object.__setattr__(self, "approval_input", approval_input)
+        object.__setattr__(self, "approval", approval)
+        object.__setattr__(self, "approval_digest", approval_digest)
+        object.__setattr__(self, "revision_number", revision_number)
 
     @property
     def workbook(self) -> WorkbookData | TabularDataset:
@@ -145,10 +200,12 @@ class BatchGenerator:
         *,
         clock: Callable[[], datetime] | None = None,
         batch_id_factory: Callable[[], str] | None = None,
+        platform_inspector: Callable[[Path], PlatformReport] | None = None,
     ) -> None:
         self._converter = converter
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._batch_id_factory = batch_id_factory or self._new_batch_id
+        self._platform_inspector = platform_inspector or PlatformReport.inspect_volume
 
     def generate(
         self,
@@ -346,6 +403,16 @@ class BatchGenerator:
         assert isinstance(plan, MappingPlan)
         assert isinstance(outputs, OutputOptions)
 
+        verification = ApprovalService.verify(request.approval, request.approval_input) if request.approval_input is not None else None
+        if verification is None or not verification.valid or request.approval_digest != request.approval.snapshot.digest:
+            code = verification.code if verification is not None and not verification.valid else "approval.required"
+            raise BatchGenerationError(
+                "The frozen project approval is missing or no longer current.",
+                code=code,
+                user_action="Return to Final approval and approve the current project revision.",
+            )
+        self._require_source_hash(dataset)
+
         cancellation = cancellation or CancellationToken()
         started_at = self._clock()
         batch_id = self._batch_id_factory()
@@ -373,6 +440,54 @@ class BatchGenerator:
                 user_action="Review and acknowledge the current warnings before generating.",
             )
 
+        frozen = request.approval_input
+        warnings = tuple(sorted(issue.code for issue in report.issues if issue.severity is Severity.WARNING))
+        if (
+            frozen.dataset_revision != dataset.revision
+            or frozen.dataset_sha256 != dataset.canonical_sha256()
+            or frozen.source_sha256 != dataset.source.sha256
+            or frozen.template_sha256 != report.template_sha256
+            or dict(frozen.mapping) != plan.to_json()
+            or dict(frozen.outputs) != outputs.to_json()
+            or frozen.warning_codes != warnings
+            or frozen.warning_ack_digest != (report.warning_digest or None)
+            or frozen.locale != request.locale
+            or frozen.recipient_count != len(outputs.row_ids)
+            or frozen.destination != str(outputs.destination.resolve())
+        ):
+            raise BatchGenerationError(
+                "The generation request differs from the frozen approval.",
+                code="approval.stale",
+                user_action="Review and approve the current project revision again.",
+            )
+
+        platform = self._platform_inspector(outputs.destination)
+        if not platform.authoritative:
+            raise BatchGenerationError(
+                "Official publication requires a fixed local NTFS destination.",
+                code="output.authoritative_destination_required",
+                user_action="Choose a fixed local NTFS folder for the official batch.",
+            )
+
+        with _destination_lock(outputs.destination):
+            return self._generate_typed_locked(
+                request, progress, cancellation, started_at, batch_id, report, platform
+            )
+
+    def _generate_typed_locked(
+        self, request: BatchRequest, progress: ProgressCallback | None,
+        cancellation: CancellationToken, started_at: datetime, batch_id: str,
+        report, platform: PlatformReport,
+    ) -> BatchResult:
+        dataset = request.dataset
+        plan = request.mappings
+        outputs = request.outputs
+        assert isinstance(dataset, TabularDataset)
+        assert isinstance(plan, MappingPlan)
+        assert isinstance(outputs, OutputOptions)
+        destination = outputs.destination
+        total = len(outputs.row_ids)
+
         needs_pdf = outputs.individual_pdf or outputs.combined_pdf
         if needs_pdf:
             availability = self._converter.is_available()
@@ -383,8 +498,18 @@ class BatchGenerator:
                     user_action="Install or repair desktop Microsoft Word, then validate again.",
                 )
 
-        destination.mkdir(parents=True, exist_ok=True)
-        final_directory = destination / self._published_folder_name(batch_id)
+        name = outputs.batch_name if outputs.batch_name else "Certificate Batch"
+        stem = safe_stem(name)
+        existing = []
+        matcher = re.compile(re.escape(stem) + r"-revision-(\d+)$", re.IGNORECASE)
+        for candidate in destination.iterdir():
+            match = matcher.fullmatch(candidate.name)
+            if match:
+                existing.append(int(match.group(1)))
+        revision_number = max(existing, default=0) + 1
+        if request.revision_number is not None and request.revision_number != revision_number:
+            raise BatchGenerationError("The proposed revision is stale.", code="output.revision_changed")
+        final_directory = destination / f"{stem}-revision-{revision_number}"
         incomplete_directory = destination / f".certificate-incomplete-{batch_id}"
         if final_directory.exists() or incomplete_directory.exists():
             raise BatchGenerationError(
@@ -392,7 +517,7 @@ class BatchGenerator:
                 code="batch_already_exists",
                 user_action="Start a new generation run to receive a new batch identifier.",
             )
-        staging = destination / f".certificate-staging-{batch_id}"
+        staging = incomplete_directory
         if staging.exists():
             raise BatchGenerationError(
                 "A staging folder with this batch identifier already exists.",
@@ -405,6 +530,13 @@ class BatchGenerator:
         page_counts: dict[str, int] = {}
         combined: CombinedPdfRecord | None = None
         try:
+            journal = BatchJournal.create(staging, {
+                "batch_id": batch_id, "approval_digest": request.approval_digest,
+                "project_revision_digest": request.approval_digest,
+                "destination": str(destination), "revision": revision_number,
+                "intended_counts": dict(request.approval.snapshot.output_counts),
+            })
+            journal.transition(JournalState.RENDERING)
             for index, row_id in enumerate(outputs.row_ids, start=1):
                 if cancellation.requested:
                     return self._cancel(staging)
@@ -479,6 +611,7 @@ class BatchGenerator:
                 request.template.path,
                 report.template_sha256,
             )
+            journal.transition(JournalState.VERIFYING)
 
             audit_outputs = tuple(
                 AuditOutput(
@@ -495,6 +628,11 @@ class BatchGenerator:
                     combined.page_count,
                     sha256_file(combined.path),
                     outputs.row_ids,
+                    tuple(
+                        fingerprint
+                        for row_id in outputs.row_ids
+                        for fingerprint in pdf_page_fingerprints(pdf_by_row[row_id])
+                    ),
                 )
                 if combined is not None
                 else None
@@ -529,13 +667,17 @@ class BatchGenerator:
                 selected_outputs=selected_options,
                 ordered_row_ids=outputs.row_ids,
                 combined_pdf=combined_audit,
+                revision_number=revision_number,
+                approval_digest=request.approval_digest,
+                journal_id=batch_id,
+                platform_report=platform.to_json(),
+                workflow=request.approval.to_json(),
             )
             write_summary(
                 audit_context,
                 staging / "batch_summary.html",
                 locale=request.locale,
             )
-            write_manifest(audit_context, staging / "manifest.json")
             write_support_log(audit_context, staging / "support.log")
 
             if not outputs.docx:
@@ -544,6 +686,8 @@ class BatchGenerator:
             if not outputs.individual_pdf:
                 for path in pdf_by_row.values():
                     path.unlink()
+
+            write_manifest(audit_context, staging / "manifest.json")
 
             selected_artifacts = tuple(
                 path
@@ -570,12 +714,50 @@ class BatchGenerator:
             )
             if cancellation.requested:
                 return self._cancel(staging)
+            self._require_source_hash(dataset)
+            self._require_template_hash(request.template.path, report.template_sha256)
+            journal.transition(JournalState.READY_TO_PUBLISH)
+            integrity = IntegrityService().verify_revision(staging, allow_ready=True)
+            if not integrity.valid:
+                raise BatchGenerationError(
+                    "The staged revision failed its integrity check.",
+                    code="integrity.staging_failed",
+                )
             if final_directory.exists():
                 raise BatchGenerationError(
                     "The final batch folder appeared during generation and was not overwritten.",
                     code="batch_already_exists",
                 )
             os.replace(staging, final_directory)
+            journal.path = final_directory / journal.path.name
+            journal.transition(JournalState.PUBLISHED)
+            result_issues = list(report.issues)
+            history_indexed: bool | None = None
+            if request.duplicate_policy.check_history:
+                history_indexed = False
+                try:
+                    if request.history_index is None:
+                        raise RuntimeError("history.unavailable")
+                    entries = tuple(
+                        HistoryEntry(
+                            tuple(dataset.row(row_id).value(column) for column in request.duplicate_policy.identity_columns),
+                            dataset.row(row_id).value(request.duplicate_policy.certificate_id_column)
+                            if request.duplicate_policy.certificate_id_column else None,
+                        )
+                        for row_id in outputs.row_ids
+                    )
+                    request.history_index.record_batch(
+                        PublishedBatch(batch_id, revision_number, completed_at, final_directory), entries
+                    )
+                    history_indexed = True
+                except Exception:
+                    result_issues.append(Issue(Severity.WARNING, "history", "history.record_failed"))
+            try:
+                for artifact in final_directory.iterdir():
+                    if artifact.is_file() and not artifact.is_symlink():
+                        artifact.chmod(artifact.stat().st_mode & ~stat.S_IWUSR & ~stat.S_IWGRP & ~stat.S_IWOTH)
+            except OSError:
+                result_issues.append(Issue(Severity.WARNING, "output", "output.protection_failed"))
             self._emit(
                 progress,
                 "publication",
@@ -587,14 +769,39 @@ class BatchGenerator:
                 BatchState.PUBLISHED,
                 output_dir=final_directory,
                 generated_count=total,
-                issues=report.issues,
+                issues=tuple(result_issues),
                 combined_pdf_path=(
                     final_directory / combined.path.name
                     if combined is not None
                     else None
                 ),
+                revision_number=revision_number,
+                history_indexed=history_indexed,
             )
         except Exception as error:
+            if final_directory.exists() and not staging.exists():
+                try:
+                    if (
+                        BatchJournal.open(final_directory / "batch_journal.json").state is JournalState.PUBLISHED
+                        and IntegrityService().verify_revision(final_directory).valid
+                    ):
+                        published_issues = list(report.issues)
+                        published_issues.append(Issue(Severity.WARNING, "journal", "journal.durability_uncertain"))
+                        if request.duplicate_policy.check_history:
+                            published_issues.append(Issue(Severity.WARNING, "history", "history.record_failed"))
+                        return BatchResult(
+                            BatchState.PUBLISHED, final_directory, total,
+                            tuple(published_issues),
+                            final_directory / combined.path.name if combined is not None else None,
+                            revision_number, False if request.duplicate_policy.check_history else None,
+                        )
+                except Exception:
+                    pass
+            if final_directory.exists() and not staging.exists():
+                try:
+                    os.replace(final_directory, staging)
+                except OSError:
+                    pass
             diagnostic_path = self._retain_incomplete(staging, batch_id, error)
             if isinstance(error, BatchGenerationError):
                 error.diagnostic_path = diagnostic_path
@@ -638,6 +845,22 @@ class BatchGenerator:
                     "The combined PDF changed before publication.",
                     code="output.combined_pdf_verification_failed",
                 ) from error
+
+    @staticmethod
+    def _require_source_hash(dataset: TabularDataset) -> None:
+        source = dataset.source
+        if source.path is None:
+            return
+        try:
+            current = sha256_file(source.path)
+        except OSError as error:
+            raise BatchGenerationError(
+                "The recipient source became unavailable.", code="approval.source_changed"
+            ) from error
+        if current != source.sha256:
+            raise BatchGenerationError(
+                "The recipient source changed after approval.", code="approval.source_changed"
+            )
 
     @staticmethod
     def _require_template_hash(path: Path, expected_hash: str) -> None:
@@ -727,6 +950,8 @@ class BatchGenerator:
         )
         os.replace(temporary, diagnostic_path)
         incomplete = staging.parent / f".certificate-incomplete-{batch_id}"
+        if staging == incomplete:
+            return diagnostic_path
         if incomplete.exists():
             incomplete = staging.parent / (
                 f".certificate-incomplete-{batch_id}-{uuid4().hex[:8]}"

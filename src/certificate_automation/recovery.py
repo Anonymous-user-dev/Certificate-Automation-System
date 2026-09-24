@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import shutil
 
@@ -15,6 +16,7 @@ class IncompleteBatch:
     batch_id: str
     path: Path
     diagnostic_path: Path
+    publication_interrupted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +45,18 @@ class RecoveryService:
                         path / "diagnostic.json",
                     )
                 )
+            elif path.is_dir() and not path.is_symlink() and "-revision-" in path.name:
+                journal = path / "batch_journal.json"
+                if not journal.is_file() or journal.is_symlink():
+                    continue
+                try:
+                    payload = json.loads(journal.read_text("utf-8"))
+                    if payload.get("schema_version") != 1 or payload.get("state") != "ready_to_publish":
+                        continue
+                    batch_id = str(payload["batch_id"])
+                except (OSError, KeyError, ValueError, TypeError):
+                    continue
+                records.append(IncompleteBatch(batch_id, path, path / "diagnostic.json", True))
         return tuple(records)
 
     def find_project_backups(self, directory: Path) -> tuple[DraftProjectBackup, ...]:

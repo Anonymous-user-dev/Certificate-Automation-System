@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 from typing import Mapping
 from uuid import uuid4
+from pypdf import PdfReader
 
 from certificate_automation.domain import Issue
 from certificate_automation.i18n import CatalogSet, package_root
@@ -32,6 +33,7 @@ class CombinedAuditOutput:
     page_count: int
     sha256: str
     source_order: tuple[str, ...]
+    page_fingerprints: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +60,13 @@ class AuditContext:
     selected_outputs: Mapping[str, object] | None = None
     ordered_row_ids: tuple[str, ...] = ()
     combined_pdf: CombinedAuditOutput | None = None
+    revision_number: int | None = None
+    approval_digest: str | None = None
+    journal_id: str | None = None
+    platform_report: Mapping[str, object] | None = None
+    workflow: Mapping[str, object] | None = None
+    page_geometry: Mapping[str, object] | None = None
+    export_status: str = "not_exported"
 
 
 def sha256_file(path: Path) -> str:
@@ -68,6 +77,41 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def pdf_page_fingerprints(path: Path) -> tuple[str, ...]:
+    """Fingerprint page dimensions and content in stable reading order."""
+
+    result = []
+    reader = PdfReader(path, strict=True)
+    for page in reader.pages:
+        digest = sha256()
+        geometry = (
+            str(page.mediabox.left), str(page.mediabox.bottom),
+            str(page.mediabox.right), str(page.mediabox.top), str(page.get("/Rotate", 0)),
+        )
+        digest.update(json.dumps(geometry).encode("ascii"))
+        contents = page.get_contents()
+        if contents is not None:
+            streams = contents if isinstance(contents, list) else (contents,)
+            for stream in streams:
+                data = stream.get_object().get_data()
+                digest.update(len(data).to_bytes(8, "big"))
+                digest.update(data)
+        result.append(digest.hexdigest())
+    return tuple(result)
+
+
+def pdf_page_geometry(path: Path) -> list[dict[str, int | float]]:
+    reader = PdfReader(path, strict=True)
+    return [
+        {
+            "width_pt": float(page.mediabox.width),
+            "height_pt": float(page.mediabox.height),
+            "rotation": int(page.get("/Rotate", 0)),
+        }
+        for page in reader.pages
+    ]
 
 
 def write_manifest(context: AuditContext, destination: Path) -> Path:
@@ -144,7 +188,7 @@ def _write_manifest_v2(context: AuditContext, destination: Path) -> Path:
             "source_order": list(context.combined_pdf.source_order),
         }
     payload = {
-        "schema_version": 2,
+        "schema_version": 3 if context.revision_number is not None else 2,
         "batch_id": context.batch_id,
         "application_version": context.application_version,
         "status": context.status,
@@ -178,6 +222,33 @@ def _write_manifest_v2(context: AuditContext, destination: Path) -> Path:
         "outputs": output_records,
         "combined_pdf": combined,
     }
+    if context.revision_number is not None:
+        from certificate_automation.verification import pdf_page_count
+
+        for record, output in zip(output_records, context.outputs):
+            record["docx_size"] = output.docx_path.stat().st_size if output.docx_path else None
+            record["pdf_size"] = output.pdf_path.stat().st_size if output.pdf_path else None
+            record["pdf_pages"] = pdf_page_count(output.pdf_path) if output.pdf_path else None
+            record["pdf_geometry"] = pdf_page_geometry(output.pdf_path) if output.pdf_path else None
+        if combined is not None:
+            combined["size"] = context.combined_pdf.path.stat().st_size
+            combined["page_fingerprints"] = list(context.combined_pdf.page_fingerprints)
+            combined["page_geometry"] = pdf_page_geometry(context.combined_pdf.path)
+        artifacts = []
+        for name in ("batch_summary.html", "support.log"):
+            path = Path(destination).parent / name
+            if path.is_file():
+                artifacts.append({"filename": name, "size": path.stat().st_size, "sha256": sha256_file(path)})
+        payload.update({
+            "revision": context.revision_number,
+            "approval_digest": context.approval_digest,
+            "journal_id": context.journal_id,
+            "platform_report": dict(context.platform_report or {}),
+            "workflow": dict(context.workflow or {}),
+            "page_geometry": dict(context.page_geometry or {}),
+            "export_status": context.export_status,
+            "artifacts": artifacts,
+        })
     return _atomic_write_text(
         Path(destination),
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

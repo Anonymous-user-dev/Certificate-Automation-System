@@ -1,0 +1,111 @@
+"""Durable, monotonic record of an official batch publication."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from enum import Enum
+import json
+import os
+from pathlib import Path
+from uuid import uuid4
+
+
+class JournalError(RuntimeError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class JournalState(str, Enum):
+    CREATED = "created"
+    RENDERING = "rendering"
+    VERIFYING = "verifying"
+    READY_TO_PUBLISH = "ready_to_publish"
+    PUBLISHED = "published"
+
+
+_ORDER = tuple(JournalState)
+
+
+def _sync_directory(path: Path) -> None:
+    if os.name != "posix":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_json(path: Path, payload: dict[str, object]) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, sort_keys=True, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        _sync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+class BatchJournal:
+    def __init__(self, path: Path, payload: dict[str, object]) -> None:
+        self.path = Path(path)
+        self._payload = payload
+
+    @property
+    def state(self) -> JournalState:
+        return JournalState(self._payload["state"])
+
+    @property
+    def batch_id(self) -> str:
+        return str(self._payload["batch_id"])
+
+    @classmethod
+    def create(cls, staging: Path, request: dict[str, object]) -> "BatchJournal":
+        staging = Path(staging)
+        if not staging.is_dir():
+            raise JournalError("journal.staging_missing")
+        path = staging / "batch_journal.json"
+        if path.exists():
+            raise JournalError("journal.already_exists")
+        now = datetime.now(timezone.utc).isoformat()
+        payload = {
+            "schema_version": 1, **request, "state": JournalState.CREATED.value,
+            "created_at": now, "updated_at": now, "last_verified_checkpoint": None,
+        }
+        try:
+            _atomic_json(path, payload)
+        except OSError as error:
+            raise JournalError("journal.write_failed") from error
+        return cls(path, payload)
+
+    @classmethod
+    def open(cls, path: Path) -> "BatchJournal":
+        try:
+            payload = json.loads(Path(path).read_text("utf-8"))
+            if payload["schema_version"] != 1:
+                raise ValueError("schema")
+            JournalState(payload["state"])
+            return cls(Path(path), payload)
+        except (OSError, KeyError, ValueError, TypeError) as error:
+            raise JournalError("journal.invalid") from error
+
+    def transition(self, state: JournalState, **facts: object) -> None:
+        state = JournalState(state)
+        if _ORDER.index(state) != _ORDER.index(self.state) + 1:
+            raise JournalError("journal.invalid_transition")
+        payload = dict(self._payload)
+        payload.update(facts)
+        payload["state"] = state.value
+        payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+        if state in (JournalState.VERIFYING, JournalState.READY_TO_PUBLISH):
+            payload["last_verified_checkpoint"] = state.value
+        try:
+            _atomic_json(self.path, payload)
+        except OSError as error:
+            raise JournalError("journal.write_failed") from error
+        self._payload = payload

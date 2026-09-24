@@ -10,6 +10,7 @@ import pytest
 from pypdf import PdfReader
 
 from certificate_automation.batch import BatchGenerator, BatchRequest
+from certificate_automation.approval import ApprovalInput, ApprovalService
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
 from certificate_automation.importers.clipboard import create_manual_dataset, import_clipboard
 from certificate_automation.importers.delimited import import_delimited
@@ -89,8 +90,36 @@ def test_real_word_publishes_verified_50_recipient_mixed_script_batch(tmp_path):
     )
     options = OutputOptions(True, True, True, tmp_path, "All Certificates", dataset.order)
 
+    frozen_input = ApprovalInput(
+        project_revision=1,
+        dataset_revision=dataset.revision,
+        dataset_sha256=dataset.canonical_sha256(),
+        source_sha256=dataset.source.sha256,
+        template_sha256=template.sha256,
+        mapping=plan.to_json(),
+        health_review={"release_acceptance": True},
+        preview_hashes=("release-acceptance-preview",),
+        warning_codes=(),
+        warning_ack_digest=None,
+        outputs=options.to_json(),
+        print_settings={},
+        word_available=True,
+        converter_identity="WordPdfConverter",
+        locale="en",
+        recipient_count=50,
+        excluded_count=0,
+        output_counts={"docx": 50, "pdf": 50, "combined": 1, "separator": 0, "manifest": 1, "report": 1},
+        expected_pages=50,
+        destination=str(tmp_path.resolve()),
+        proposed_revision_folder="pending",
+        template_name=template.path.name,
+    )
+    approval = ApprovalService.freeze(frozen_input, "Release acceptance preparer")
+
     result = BatchGenerator(WordPdfConverter(max_attempts=2)).generate(
-        BatchRequest(dataset, template, plan, options, "en")
+        BatchRequest(dataset, template, plan, options, "en",
+                     approval_input=frozen_input, approval=approval,
+                     approval_digest=approval.snapshot.digest)
     )
 
     output = result.output_dir

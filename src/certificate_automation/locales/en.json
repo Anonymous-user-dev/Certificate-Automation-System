@@ -305,6 +305,7 @@
   "history.unavailable": "Earlier batches could not be checked for duplicates. Review this batch carefully and acknowledge this warning before continuing.",
   "history.protection_unavailable": "This Windows user cannot unlock the local duplicate history. Earlier batches were not checked.",
   "history.record_failed": "The completed batch could not be added to local duplicate history.",
+  "journal.durability_uncertain": "The official folder is present and verifies, but its final save could not be confirmed. Keep the folder and run an integrity check before printing.",
   "history.clear_failed": "The local duplicate history could not be cleared.",
   "history.invalid_policy": "The saved duplicate-check settings are invalid. Review the selected columns.",
   "history.invalid_batch": "The completed batch details are invalid and could not be indexed.",

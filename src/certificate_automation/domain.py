@@ -71,3 +71,5 @@ class BatchResult:
     generated_count: int = 0
     issues: tuple[Issue, ...] = field(default_factory=tuple)
     combined_pdf_path: Path | None = None
+    revision_number: int | None = None
+    history_indexed: bool | None = None

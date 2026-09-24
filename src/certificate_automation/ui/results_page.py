@@ -149,6 +149,10 @@ class ResultsPage(QWidget):
             detail = self._catalogs.text("results.combined_not_selected")
         self.status_label.setText(
             self._catalogs.text("generation.published") + "\n" + detail
+            + ("\n" + self._catalogs.text("history.record_failed")
+               if result.history_indexed is False else "")
+            + ("\n" + self._catalogs.text("journal.durability_uncertain")
+               if any(issue.code == "journal.durability_uncertain" for issue in result.issues) else "")
         )
 
     def _enable_results(self, enabled: bool) -> None:

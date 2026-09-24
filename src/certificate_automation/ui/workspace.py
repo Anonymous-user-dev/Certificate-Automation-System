@@ -1892,6 +1892,9 @@ class WorkspaceWindow(QMainWindow):
             duplicate_policy=current.duplicate_policy,
             history_index=getattr(self.services, "history_index", None),
             warning_ack_digest=current.warning_ack_digest,
+            approval_input=approval_input,
+            approval=self._approval,
+            approval_digest=self._approval.snapshot.digest,
         )
         self.mark_step_complete("approval")
         self.navigate("generate")

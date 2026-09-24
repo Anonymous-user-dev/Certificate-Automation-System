@@ -19,6 +19,7 @@ from certificate_automation.history import HistoryIndex
 from certificate_automation.i18n import CatalogSet, package_root
 from certificate_automation.mapping import ColumnValue, FormattedDateValue, MappingPlan
 from certificate_automation.output_options import OutputOptions
+from certificate_automation.platform_report import PlatformReport
 from certificate_automation.project import ProjectState, ProjectStore
 from certificate_automation.template import inspect_template
 from certificate_automation.template_health import TemplateHealthService
@@ -160,7 +161,8 @@ def test_operator_combined_only_creates_ordered_pdf_and_opens_published_file(
     template_path = docx_factory(paragraph_runs=[["{{FULL_NAME}}"], ["{{AWARD}}"]])
     services = _services(tmp_path, template_path)
     services.batch_generator = BatchGenerator(
-        Converter(), batch_id_factory=lambda: "20260922-120000-abcd1234"
+        Converter(), batch_id_factory=lambda: "20260922-120000-abcd1234",
+        platform_inspector=lambda path: PlatformReport.from_facts(path, filesystem="NTFS", fixed=True, cloud=False, unc=False),
     )
     opened = []
     services.open_path = lambda path: opened.append(Path(path)) or True
