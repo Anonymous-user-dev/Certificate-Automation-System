@@ -88,6 +88,32 @@ def test_approval_roundtrip_preserves_digest_and_verification(approval_input):
     assert ApprovalService.verify(loaded, approval_input).valid
 
 
+def test_snapshot_output_counts_cannot_change_in_place_after_freeze(approval_input):
+    approved = ApprovalService.freeze(approval_input, "Alice")
+    before = approved.snapshot.digest
+    with pytest.raises(TypeError):
+        approved.snapshot.output_counts["docx"] = 0
+    assert approved.snapshot.output_counts["docx"] == 1
+    assert approved.snapshot.digest == before
+    assert ApprovalService.verify(approved, approval_input).valid
+
+
+def test_approval_input_deep_copies_and_freezes_nested_configuration(approval_input):
+    source_mapping = {"FULL_NAME": {"type": "column", "column_id": "name"}}
+    source_outputs = {"row_ids": ["r1"], "docx": True}
+    frozen = replace(approval_input, mapping=source_mapping, outputs=source_outputs)
+    digest = ApprovalService.freeze(frozen, "Alice").snapshot.digest
+    source_mapping["FULL_NAME"]["column_id"] = "changed"
+    source_outputs["row_ids"].append("r2")
+    assert frozen.mapping["FULL_NAME"]["column_id"] == "name"
+    assert frozen.outputs["row_ids"] == ("r1",)
+    with pytest.raises(TypeError):
+        frozen.mapping["FULL_NAME"]["column_id"] = "changed"
+    with pytest.raises(AttributeError):
+        frozen.outputs["row_ids"].append("r2")
+    assert ApprovalService.freeze(frozen, "Alice").snapshot.digest == digest
+
+
 def test_two_person_mode_cannot_be_removed_from_saved_record(approval_input):
     frozen = ApprovalService.freeze(approval_input, "Alice", two_person=True)
     changed = replace(frozen, two_person=False)

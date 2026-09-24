@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 import shutil
+
+from certificate_automation.batch_journal import INTENT_PREFIX
 
 
 INCOMPLETE_PREFIX = ".certificate-incomplete-"
@@ -32,6 +35,31 @@ class RecoveryService:
         if not destination.is_dir():
             return ()
         records = []
+        pending_intents: dict[str, tuple[str, Path, str, int]] = {}
+        for intent in destination.glob(f"{INTENT_PREFIX}*.json"):
+            if not intent.is_file() or intent.is_symlink():
+                continue
+            try:
+                payload = json.loads(intent.read_text("utf-8"))
+                batch_id = payload["batch_id"]
+                final_name = payload["final_name"]
+                revision = payload["revision"]
+                digest = payload["approval_digest"]
+                if (
+                    payload.get("schema_version") != 1 or payload.get("status") != "pending"
+                    or not isinstance(batch_id, str)
+                    or intent.name != f"{INTENT_PREFIX}{batch_id}.json"
+                    or not isinstance(final_name, str)
+                    or Path(final_name).name != final_name
+                    or "/" in final_name or "\\" in final_name
+                    or not isinstance(revision, int) or revision < 1
+                    or not final_name.endswith(f"-revision-{revision}")
+                    or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                ):
+                    continue
+                pending_intents[final_name] = (batch_id, intent, digest, revision)
+            except (OSError, KeyError, ValueError, TypeError):
+                continue
         for path in sorted(destination.iterdir(), key=lambda item: item.name.casefold()):
             if (
                 path.is_dir()
@@ -57,12 +85,19 @@ class RecoveryService:
                     batch_id = str(payload["batch_id"])
                 except (OSError, KeyError, ValueError, TypeError):
                     continue
+                intent = pending_intents.get(path.name)
+                if intent is not None and (
+                    intent[0] != batch_id
+                    or intent[2] != payload.get("approval_digest")
+                    or intent[3] != payload.get("revision")
+                ):
+                    intent = None
                 interrupted = payload.get("state") == "ready_to_publish"
                 if not interrupted and payload.get("state") == "published":
                     from certificate_automation.integrity import IntegrityService
-                    interrupted = marker.is_file() or not IntegrityService().verify_revision(path).valid
+                    interrupted = intent is not None or marker.is_file() or not IntegrityService().verify_revision(path).valid
                 if interrupted:
-                    diagnostic = marker if marker.is_file() else journal
+                    diagnostic = marker if marker.is_file() else intent[1] if intent is not None else journal
                     records.append(IncompleteBatch(batch_id, path, diagnostic, True))
         return tuple(records)
 

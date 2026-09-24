@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
+from types import MappingProxyType
 from typing import Mapping
 
 
@@ -17,6 +18,14 @@ def _plain(value):
         return {str(key): _plain(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_plain(item) for item in value]
+    return value
+
+
+def _immutable(value):
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _immutable(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_immutable(item) for item in value)
     return value
 
 
@@ -45,6 +54,12 @@ class ApprovalInput:
     proposed_revision_folder: str
     template_name: str
 
+    def __post_init__(self) -> None:
+        for name in ("mapping", "health_review", "outputs", "print_settings", "output_counts"):
+            object.__setattr__(self, name, _immutable(getattr(self, name)))
+        object.__setattr__(self, "preview_hashes", _immutable(self.preview_hashes))
+        object.__setattr__(self, "warning_codes", _immutable(self.warning_codes))
+
     def payload(self) -> dict[str, object]:
         return {name: _plain(getattr(self, name)) for name in self.__dataclass_fields__}
 
@@ -56,6 +71,10 @@ class ApprovalSnapshot:
     recipient_count: int
     output_counts: Mapping[str, int]
     warning_codes: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "output_counts", _immutable(self.output_counts))
+        object.__setattr__(self, "warning_codes", _immutable(self.warning_codes))
 
     def to_json(self) -> dict[str, object]:
         return {

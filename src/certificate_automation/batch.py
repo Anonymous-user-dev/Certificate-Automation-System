@@ -447,8 +447,8 @@ class BatchGenerator:
             or frozen.dataset_sha256 != dataset.canonical_sha256()
             or frozen.source_sha256 != dataset.source.sha256
             or frozen.template_sha256 != report.template_sha256
-            or dict(frozen.mapping) != plan.to_json()
-            or dict(frozen.outputs) != outputs.to_json()
+            or frozen.payload()["mapping"] != plan.to_json()
+            or frozen.payload()["outputs"] != outputs.to_json()
             or frozen.warning_codes != warnings
             or frozen.warning_ack_digest != (report.warning_digest or None)
             or frozen.locale != request.locale
@@ -529,6 +529,7 @@ class BatchGenerator:
         pdf_by_row: dict[str, Path] = {}
         page_counts: dict[str, int] = {}
         combined: CombinedPdfRecord | None = None
+        intent_path: Path | None = None
         try:
             journal = BatchJournal.create(staging, {
                 "batch_id": batch_id, "approval_digest": request.approval_digest,
@@ -736,6 +737,10 @@ class BatchGenerator:
                     "The final batch folder appeared during generation and was not overwritten.",
                     code="batch_already_exists",
                 )
+            intent_path = BatchJournal.create_publish_intent(
+                destination, batch_id, final_directory.name,
+                request.approval_digest, revision_number,
+            )
             os.replace(staging, final_directory)
             journal.path = final_directory / journal.path.name
             journal.transition(JournalState.PUBLISHED)
@@ -773,6 +778,11 @@ class BatchGenerator:
                 total,
                 "Published the complete verified batch.",
             )
+            if intent_path is not None:
+                try:
+                    BatchJournal.clear_publish_intent(intent_path)
+                except Exception:
+                    result_issues.append(Issue(Severity.WARNING, "journal", "journal.durability_uncertain"))
             return BatchResult(
                 BatchState.PUBLISHED,
                 output_dir=final_directory,
@@ -801,6 +811,11 @@ class BatchGenerator:
                         published_issues.append(Issue(Severity.WARNING, "journal", "journal.durability_uncertain"))
                         if request.duplicate_policy.check_history:
                             published_issues.append(Issue(Severity.WARNING, "history", "history.record_failed"))
+                        if intent_path is not None:
+                            try:
+                                BatchJournal.clear_publish_intent(intent_path)
+                            except Exception:
+                                pass
                         return BatchResult(
                             BatchState.PUBLISHED, final_directory, total,
                             tuple(published_issues),
@@ -823,6 +838,11 @@ class BatchGenerator:
                         diagnostic_path=diagnostic_path,
                         user_action="Open Recovery and inspect this exact folder before using or retrying it.",
                     ) from rollback_error
+            if intent_path is not None:
+                try:
+                    BatchJournal.clear_publish_intent(intent_path)
+                except Exception:
+                    pass
             diagnostic_path = self._retain_incomplete(staging, batch_id, error)
             if isinstance(error, BatchGenerationError):
                 error.diagnostic_path = diagnostic_path

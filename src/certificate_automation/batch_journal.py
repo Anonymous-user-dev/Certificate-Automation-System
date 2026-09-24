@@ -8,6 +8,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import re
 from uuid import uuid4
 
 
@@ -26,6 +27,7 @@ class JournalState(str, Enum):
 
 
 _ORDER = tuple(JournalState)
+INTENT_PREFIX = ".certificate-publish-intent-"
 
 
 def approval_facts_digest(approval_digest: str, intended_counts: dict[str, int], row_ids: tuple[str, ...] | list[str]) -> str:
@@ -144,3 +146,46 @@ class BatchJournal:
         except OSError as error:
             raise JournalError("journal.recovery_marker_failed") from error
         return marker
+
+    @staticmethod
+    def create_publish_intent(
+        destination: Path, batch_id: str, final_name: str,
+        approval_digest: str, revision: int,
+    ) -> Path:
+        """Persist the exact final target before the irreversible rename window."""
+
+        destination = Path(destination)
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_-]+", batch_id)
+            or Path(final_name).name != final_name
+            or "/" in final_name or "\\" in final_name
+            or not final_name.endswith(f"-revision-{revision}")
+        ):
+            raise JournalError("journal.invalid_publication_intent")
+        path = destination / f"{INTENT_PREFIX}{batch_id}.json"
+        if path.exists():
+            raise JournalError("journal.publication_intent_exists")
+        try:
+            _atomic_json(path, {
+                "schema_version": 1,
+                "status": "pending",
+                "batch_id": batch_id,
+                "final_name": final_name,
+                "approval_digest": approval_digest,
+                "revision": revision,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except OSError as error:
+            raise JournalError("journal.publication_intent_failed") from error
+        return path
+
+    @staticmethod
+    def clear_publish_intent(path: Path) -> None:
+        path = Path(path)
+        if not path.name.startswith(INTENT_PREFIX) or path.suffix != ".json" or path.is_symlink():
+            raise JournalError("journal.invalid_publication_intent")
+        try:
+            path.unlink(missing_ok=True)
+            _sync_directory(path.parent)
+        except OSError as error:
+            raise JournalError("journal.publication_intent_clear_failed") from error

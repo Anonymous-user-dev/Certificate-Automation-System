@@ -441,6 +441,78 @@ def test_failed_final_integrity_and_failed_rollback_remain_visible_to_recovery(t
     assert not IntegrityService().verify_revision(stranded).valid
 
 
+def test_recovery_finds_stranded_published_folder_when_marker_write_also_fails(tmp_path, docx_factory, monkeypatch):
+    from certificate_automation.batch_journal import BatchJournal, JournalError
+    from certificate_automation.integrity import IntegrityReport
+    from certificate_automation.recovery import RecoveryService
+    request = _typed_request(tmp_path, docx_factory)
+    original_verify = IntegrityService.verify_revision
+    original_replace = __import__("os").replace
+    failing = True
+
+    def transient_integrity_failure(self, path, **kwargs):
+        if failing and Path(path).name == "Awards-revision-1":
+            return IntegrityReport(False, ("integrity.transient_failure",))
+        return original_verify(self, path, **kwargs)
+
+    def fail_rollback(source, destination):
+        if Path(source).name == "Awards-revision-1" and Path(destination).name.startswith(".certificate-incomplete-"):
+            raise PermissionError("locked")
+        return original_replace(source, destination)
+
+    def fail_marker(*args):
+        raise JournalError("journal.recovery_marker_failed")
+
+    def fail_after_rename(event):
+        if event.phase == "publication":
+            raise OSError("transient verification fault")
+
+    monkeypatch.setattr(IntegrityService, "verify_revision", transient_integrity_failure)
+    monkeypatch.setattr("certificate_automation.batch.os.replace", fail_rollback)
+    monkeypatch.setattr(BatchJournal, "mark_stranded", fail_marker)
+    with pytest.raises(BatchGenerationError) as caught:
+        _generator(FakeConverter()).generate(request, progress=fail_after_rename)
+    failing = False
+    stranded = request.destination / "Awards-revision-1"
+    assert IntegrityService().verify_revision(stranded).valid
+    assert caught.value.code == "output.publication_ambiguous"
+    assert caught.value.diagnostic_path.is_file()
+    assert any(record.path == stranded for record in RecoveryService().find_incomplete(request.destination))
+
+
+def test_successful_published_revision_is_not_offered_as_incomplete_recovery(tmp_path, docx_factory):
+    from certificate_automation.recovery import RecoveryService
+    request = _typed_request(tmp_path, docx_factory)
+    result = _generator(FakeConverter()).generate(request)
+    assert RecoveryService().find_incomplete(request.destination) == ()
+    assert result.output_dir.is_dir()
+
+
+def test_publication_intent_write_failure_blocks_final_rename(tmp_path, docx_factory, monkeypatch):
+    from certificate_automation.batch_journal import BatchJournal, JournalError
+    request = _typed_request(tmp_path, docx_factory)
+    def fail_intent(*args):
+        raise JournalError("journal.publication_intent_failed")
+    monkeypatch.setattr(BatchJournal, "create_publish_intent", fail_intent)
+    with pytest.raises(BatchGenerationError) as caught:
+        _generator(FakeConverter()).generate(request)
+    assert not list(request.destination.glob("Awards-revision-*"))
+    assert caught.value.diagnostic_path.is_file()
+
+
+def test_unremovable_intent_keeps_published_folder_visible_to_recovery(tmp_path, docx_factory, monkeypatch):
+    from certificate_automation.batch_journal import BatchJournal, JournalError
+    from certificate_automation.recovery import RecoveryService
+    request = _typed_request(tmp_path, docx_factory)
+    def fail_clear(*args):
+        raise JournalError("journal.publication_intent_clear_failed")
+    monkeypatch.setattr(BatchJournal, "clear_publish_intent", fail_clear)
+    result = _generator(FakeConverter()).generate(request)
+    assert result.state is BatchState.PUBLISHED
+    assert any(issue.code == "journal.durability_uncertain" for issue in result.issues)
+    assert any(record.path == result.output_dir for record in RecoveryService().find_incomplete(request.destination))
+
+
 @pytest.mark.parametrize("boundary", ["created", "rendering", "verifying", "ready_to_publish", "published"])
 def test_interruption_at_each_journal_boundary_never_publishes_partial_batch(tmp_path, docx_factory, monkeypatch, boundary):
     from certificate_automation.batch_journal import BatchJournal, JournalError, JournalState
