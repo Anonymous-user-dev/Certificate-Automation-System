@@ -47,16 +47,23 @@ class RecoveryService:
                 )
             elif path.is_dir() and not path.is_symlink() and "-revision-" in path.name:
                 journal = path / "batch_journal.json"
+                marker = path / ".certificate-publication-failed.json"
                 if not journal.is_file() or journal.is_symlink():
                     continue
                 try:
                     payload = json.loads(journal.read_text("utf-8"))
-                    if payload.get("schema_version") != 1 or payload.get("state") != "ready_to_publish":
+                    if payload.get("schema_version") != 1:
                         continue
                     batch_id = str(payload["batch_id"])
                 except (OSError, KeyError, ValueError, TypeError):
                     continue
-                records.append(IncompleteBatch(batch_id, path, path / "diagnostic.json", True))
+                interrupted = payload.get("state") == "ready_to_publish"
+                if not interrupted and payload.get("state") == "published":
+                    from certificate_automation.integrity import IntegrityService
+                    interrupted = marker.is_file() or not IntegrityService().verify_revision(path).valid
+                if interrupted:
+                    diagnostic = marker if marker.is_file() else journal
+                    records.append(IncompleteBatch(batch_id, path, diagnostic, True))
         return tuple(records)
 
     def find_project_backups(self, directory: Path) -> tuple[DraftProjectBackup, ...]:

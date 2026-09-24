@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import stat
+from pathlib import Path
 from datetime import datetime, timezone
 from hashlib import sha256
 
@@ -404,6 +405,40 @@ def test_journal_write_error_after_published_record_keeps_verified_revision(tmp_
     assert IntegrityService().verify_revision(result.output_dir).valid
     assert not list(request.destination.glob(".certificate-incomplete-*"))
     assert any(issue.code == "journal.durability_uncertain" for issue in result.issues)
+
+
+def test_failed_final_integrity_and_failed_rollback_remain_visible_to_recovery(tmp_path, docx_factory, monkeypatch):
+    from certificate_automation.integrity import IntegrityReport
+    from certificate_automation.recovery import RecoveryService
+    request = _typed_request(tmp_path, docx_factory)
+    original_verify = IntegrityService.verify_revision
+    original_replace = __import__("os").replace
+
+    def fail_final_verification(self, path, **kwargs):
+        if Path(path).name == "Awards-revision-1":
+            return IntegrityReport(False, ("integrity.artifact_changed",))
+        return original_verify(self, path, **kwargs)
+
+    def fail_rollback(source, destination):
+        if Path(source).name == "Awards-revision-1" and Path(destination).name.startswith(".certificate-incomplete-"):
+            raise PermissionError("rollback locked")
+        return original_replace(source, destination)
+
+    def fail_after_rename(event):
+        if event.phase == "publication":
+            raise OSError("post-publication I/O fault")
+
+    monkeypatch.setattr(IntegrityService, "verify_revision", fail_final_verification)
+    monkeypatch.setattr("certificate_automation.batch.os.replace", fail_rollback)
+    with pytest.raises(BatchGenerationError) as caught:
+        _generator(FakeConverter()).generate(request, progress=fail_after_rename)
+    stranded = request.destination / "Awards-revision-1"
+    assert stranded.is_dir()
+    assert caught.value.diagnostic_path is not None
+    assert caught.value.diagnostic_path.is_file()
+    assert caught.value.code == "output.publication_ambiguous"
+    assert any(record.path == stranded for record in RecoveryService().find_incomplete(request.destination))
+    assert not IntegrityService().verify_revision(stranded).valid
 
 
 @pytest.mark.parametrize("boundary", ["created", "rendering", "verifying", "ready_to_publish", "published"])

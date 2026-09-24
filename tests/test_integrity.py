@@ -8,6 +8,7 @@ import pytest
 from pypdf import PdfWriter
 
 from certificate_automation.audit import AuditContext, AuditOutput, CombinedAuditOutput, sha256_file, write_manifest
+from certificate_automation.batch_journal import approval_facts_digest
 from certificate_automation.integrity import IntegrityService
 
 
@@ -40,11 +41,17 @@ def revision(tmp_path):
         dataset_revision=1, revision_number=1, approval_digest="a" * 64,
         journal_id="batch-1", ordered_row_ids=("row-1",),
         platform_report={"volume": "NTFS"},
+        workflow={"snapshot": {"digest": "a" * 64, "recipient_count": 1,
+                               "output_counts": {"docx": 1, "pdf": 1, "combined": 0}}},
     )
     write_manifest(context, folder / "manifest.json")
+    counts = {"recipients": 1, "docx": 1, "pdf": 1, "combined": 0}
     (folder / "batch_journal.json").write_text(json.dumps({
         "schema_version": 1, "batch_id": "batch-1", "state": "published",
         "approval_digest": "a" * 64, "revision": 1,
+        "intended_counts": counts,
+        "approved_row_ids": ["row-1"],
+        "approval_facts_sha256": approval_facts_digest("a" * 64, counts, ["row-1"]),
     }), encoding="utf-8")
     return folder
 
@@ -68,6 +75,53 @@ def test_integrity_rejects_extra_file_with_same_name_ignoring_case(revision):
 def test_integrity_rejects_missing_publication_journal(revision):
     (revision / "batch_journal.json").unlink()
     assert not IntegrityService().verify_revision(revision).valid
+
+
+def test_integrity_rejects_coherently_removed_recipient_and_artifacts(revision):
+    manifest_path = revision / "manifest.json"
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    manifest["outputs"] = []
+    manifest["ordered_row_ids"] = []
+    manifest["counts"].update({"recipients": 0, "docx": 0, "pdf": 0})
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    (revision / "one.docx").unlink()
+    (revision / "one.pdf").unlink()
+    assert not IntegrityService().verify_revision(revision).valid
+
+
+def test_integrity_rejects_changed_journal_intent_when_approval_binding_is_unchanged(revision):
+    journal_path = revision / "batch_journal.json"
+    journal = json.loads(journal_path.read_text("utf-8"))
+    journal["intended_counts"] = {"recipients": 0, "docx": 0, "pdf": 0, "combined": 0}
+    journal["approved_row_ids"] = []
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    assert not IntegrityService().verify_revision(revision).valid
+
+
+def test_external_frozen_approval_rejects_coordinated_manifest_and_journal_omission(revision):
+    from certificate_automation.approval import ApprovalSnapshot
+    manifest_path = revision / "manifest.json"
+    journal_path = revision / "batch_journal.json"
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    journal = json.loads(journal_path.read_text("utf-8"))
+    frozen = ApprovalSnapshot("a" * 64, 1, 1, {"docx": 1, "pdf": 1, "combined": 0}, ())
+    manifest["outputs"] = []
+    manifest["ordered_row_ids"] = []
+    manifest["counts"].update({"recipients": 0, "docx": 0, "pdf": 0})
+    manifest["workflow"]["snapshot"]["recipient_count"] = 0
+    manifest["workflow"]["snapshot"]["output_counts"].update({"docx": 0, "pdf": 0})
+    journal["intended_counts"].update({"recipients": 0, "docx": 0, "pdf": 0})
+    journal["approved_row_ids"] = []
+    journal["approval_facts_sha256"] = approval_facts_digest("a" * 64, journal["intended_counts"], [])
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    (revision / "one.docx").unlink()
+    (revision / "one.pdf").unlink()
+    report = IntegrityService().verify_revision(
+        revision, approved_snapshot=frozen, approved_row_ids=("row-1",),
+    )
+    assert not report.valid
+    assert "integrity.external_approval_mismatch" in report.issues
 
 
 @pytest.mark.parametrize("mutation", ["missing", "extra", "changed", "renamed", "wrong_pages", "wrong_order", "traversal", "collision", "wrong_count"])
@@ -127,13 +181,18 @@ def test_integrity_detects_combined_page_swap_even_with_updated_file_hash(tmp_pa
         (AuditOutput(2, None, first, "row-1"), AuditOutput(3, None, second, "row-2")),
         dataset_revision=1, revision_number=1, approval_digest="a" * 64,
         journal_id="batch-1", ordered_row_ids=("row-1", "row-2"),
+        workflow={"snapshot": {"digest": "a" * 64, "recipient_count": 2,
+                               "output_counts": {"docx": 0, "pdf": 2, "combined": 1}}},
         combined_pdf=CombinedAuditOutput(combined, 2, sha256_file(combined), ("row-1", "row-2"),
                                          pdf_page_fingerprints(first) + pdf_page_fingerprints(second)),
     )
     write_manifest(context, folder / "manifest.json")
+    counts = {"recipients": 2, "docx": 0, "pdf": 2, "combined": 1}
     (folder / "batch_journal.json").write_text(json.dumps({
         "schema_version": 1, "batch_id": "batch-1", "state": "published",
         "approval_digest": "a" * 64, "revision": 1,
+        "intended_counts": counts, "approved_row_ids": ["row-1", "row-2"],
+        "approval_facts_sha256": approval_facts_digest("a" * 64, counts, ["row-1", "row-2"]),
     }), encoding="utf-8")
     assert IntegrityService().verify_revision(folder).valid
     writer = PdfWriter()

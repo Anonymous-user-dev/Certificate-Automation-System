@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 
 from certificate_automation.audit import pdf_page_fingerprints, pdf_page_geometry, sha256_file
+from certificate_automation.approval import ApprovalSnapshot
+from certificate_automation.batch_journal import approval_facts_digest
 from certificate_automation.verification import pdf_page_count
 
 
@@ -28,7 +30,11 @@ def _safe_name(value: object) -> str | None:
 
 
 class IntegrityService:
-    def verify_revision(self, path: Path, *, allow_ready: bool = False) -> IntegrityReport:
+    def verify_revision(
+        self, path: Path, *, allow_ready: bool = False,
+        approved_snapshot: ApprovalSnapshot | None = None,
+        approved_row_ids: tuple[str, ...] | None = None,
+    ) -> IntegrityReport:
         folder = Path(path)
         issues: list[str] = []
         try:
@@ -85,6 +91,17 @@ class IntegrityService:
             }
             if any(counts.get(key) != value for key, value in actual_counts.items()):
                 issues.append("integrity.count_mismatch")
+            if approved_snapshot is not None and (
+                manifest.get("approval_digest") != approved_snapshot.digest
+                or approved_snapshot.recipient_count != actual_counts["recipients"]
+                or any(
+                    approved_snapshot.output_counts.get(key) != actual_counts[manifest_key]
+                    for key, manifest_key in (("docx", "docx"), ("pdf", "pdf"), ("combined", "combined_pdf"))
+                )
+            ):
+                issues.append("integrity.external_approval_mismatch")
+            if approved_row_ids is not None and tuple(order) != approved_row_ids:
+                issues.append("integrity.external_approval_mismatch")
             if combined is not None:
                 if not isinstance(combined, dict) or combined.get("source_order") != order:
                     issues.append("integrity.combined_order_mismatch")
@@ -128,6 +145,37 @@ class IntegrityService:
                         or record.get("state") not in allowed
                     ):
                         issues.append("integrity.journal_mismatch")
+                    if approved_snapshot is not None and record.get("approval_digest") != approved_snapshot.digest:
+                        issues.append("integrity.external_approval_mismatch")
+                    if approved_row_ids is not None and record.get("approved_row_ids") != list(approved_row_ids):
+                        issues.append("integrity.external_approval_mismatch")
+                    intended = record.get("intended_counts")
+                    approved_rows = record.get("approved_row_ids")
+                    if not isinstance(intended, dict) or not isinstance(approved_rows, list):
+                        issues.append("integrity.approval_facts_missing")
+                    else:
+                        expected_counts = {
+                            "recipients": actual_counts["recipients"],
+                            "docx": actual_counts["docx"],
+                            "pdf": actual_counts["pdf"],
+                            "combined": actual_counts["combined_pdf"],
+                        }
+                        if any(intended.get(key) != value for key, value in expected_counts.items()) or approved_rows != order:
+                            issues.append("integrity.approval_output_mismatch")
+                        if record.get("approval_facts_sha256") != approval_facts_digest(
+                            record.get("approval_digest"), intended, approved_rows
+                        ):
+                            issues.append("integrity.approval_binding_mismatch")
+                        workflow = manifest.get("workflow")
+                        snapshot = workflow.get("snapshot") if isinstance(workflow, dict) else None
+                        approved_counts = snapshot.get("output_counts") if isinstance(snapshot, dict) else None
+                        if (
+                            not isinstance(approved_counts, dict)
+                            or snapshot.get("digest") != record.get("approval_digest")
+                            or snapshot.get("recipient_count") != intended.get("recipients")
+                            or any(approved_counts.get(key) != intended.get(key) for key in ("docx", "pdf", "combined"))
+                        ):
+                            issues.append("integrity.approval_output_mismatch")
                 except (ValueError, OSError):
                     issues.append("integrity.journal_invalid")
             for name, (digest, size, pages) in expected.items():

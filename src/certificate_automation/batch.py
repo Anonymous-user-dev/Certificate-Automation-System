@@ -534,7 +534,11 @@ class BatchGenerator:
                 "batch_id": batch_id, "approval_digest": request.approval_digest,
                 "project_revision_digest": request.approval_digest,
                 "destination": str(destination), "revision": revision_number,
-                "intended_counts": dict(request.approval.snapshot.output_counts),
+                "intended_counts": {
+                    **dict(request.approval.snapshot.output_counts),
+                    "recipients": request.approval.snapshot.recipient_count,
+                },
+                "approved_row_ids": list(outputs.row_ids),
             })
             journal.transition(JournalState.RENDERING)
             for index, row_id in enumerate(outputs.row_ids, start=1):
@@ -717,7 +721,11 @@ class BatchGenerator:
             self._require_source_hash(dataset)
             self._require_template_hash(request.template.path, report.template_sha256)
             journal.transition(JournalState.READY_TO_PUBLISH)
-            integrity = IntegrityService().verify_revision(staging, allow_ready=True)
+            integrity = IntegrityService().verify_revision(
+                staging, allow_ready=True,
+                approved_snapshot=request.approval.snapshot,
+                approved_row_ids=outputs.row_ids,
+            )
             if not integrity.valid:
                 raise BatchGenerationError(
                     "The staged revision failed its integrity check.",
@@ -783,7 +791,11 @@ class BatchGenerator:
                 try:
                     if (
                         BatchJournal.open(final_directory / "batch_journal.json").state is JournalState.PUBLISHED
-                        and IntegrityService().verify_revision(final_directory).valid
+                        and IntegrityService().verify_revision(
+                            final_directory,
+                            approved_snapshot=request.approval.snapshot,
+                            approved_row_ids=outputs.row_ids,
+                        ).valid
                     ):
                         published_issues = list(report.issues)
                         published_issues.append(Issue(Severity.WARNING, "journal", "journal.durability_uncertain"))
@@ -800,8 +812,17 @@ class BatchGenerator:
             if final_directory.exists() and not staging.exists():
                 try:
                     os.replace(final_directory, staging)
-                except OSError:
-                    pass
+                except OSError as rollback_error:
+                    try:
+                        diagnostic_path = BatchJournal.mark_stranded(final_directory, batch_id)
+                    except Exception:
+                        diagnostic_path = final_directory / "batch_journal.json"
+                    raise BatchGenerationError(
+                        f"Publication could not be confirmed. Review the recoverable folder: {final_directory}",
+                        code="output.publication_ambiguous",
+                        diagnostic_path=diagnostic_path,
+                        user_action="Open Recovery and inspect this exact folder before using or retrying it.",
+                    ) from rollback_error
             diagnostic_path = self._retain_incomplete(staging, batch_id, error)
             if isinstance(error, BatchGenerationError):
                 error.diagnostic_path = diagnostic_path

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,17 @@ class JournalState(str, Enum):
 
 
 _ORDER = tuple(JournalState)
+
+
+def approval_facts_digest(approval_digest: str, intended_counts: dict[str, int], row_ids: tuple[str, ...] | list[str]) -> str:
+    """Bind the journal's public output intent to the frozen approval identity."""
+
+    facts = {
+        "approval_digest": approval_digest,
+        "intended_counts": intended_counts,
+        "approved_row_ids": list(row_ids),
+    }
+    return sha256(json.dumps(facts, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _sync_directory(path: Path) -> None:
@@ -77,6 +89,10 @@ class BatchJournal:
             "schema_version": 1, **request, "state": JournalState.CREATED.value,
             "created_at": now, "updated_at": now, "last_verified_checkpoint": None,
         }
+        if "approved_row_ids" in request and "intended_counts" in request:
+            payload["approval_facts_sha256"] = approval_facts_digest(
+                str(request["approval_digest"]), dict(request["intended_counts"]), list(request["approved_row_ids"])
+            )
         try:
             _atomic_json(path, payload)
         except OSError as error:
@@ -109,3 +125,22 @@ class BatchJournal:
         except OSError as error:
             raise JournalError("journal.write_failed") from error
         self._payload = payload
+
+    @staticmethod
+    def mark_stranded(folder: Path, batch_id: str) -> Path:
+        """Durably flag a revision-looking folder whose rollback was blocked."""
+
+        folder = Path(folder)
+        if not folder.is_dir() or folder.is_symlink() or "-revision-" not in folder.name:
+            raise JournalError("journal.invalid_recovery_target")
+        marker = folder / ".certificate-publication-failed.json"
+        try:
+            _atomic_json(marker, {
+                "schema_version": 1,
+                "batch_id": batch_id,
+                "status": "publication_ambiguous",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except OSError as error:
+            raise JournalError("journal.recovery_marker_failed") from error
+        return marker
