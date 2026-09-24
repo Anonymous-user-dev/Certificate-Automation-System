@@ -204,6 +204,13 @@ def test_operator_combined_only_creates_ordered_pdf_and_opens_published_file(
     assert str(result.combined_pdf_path) in window.results_page.status_label.text()
     qtbot.mouseClick(window.results_page.open_combined_button, Qt.MouseButton.LeftButton)
     assert opened == [result.combined_pdf_path]
+    window._show_home()
+    qtbot.mouseClick(window.home.history_button, Qt.MouseButton.LeftButton)
+    record_index = next(index for index, record in enumerate(window.history_page.records)
+                        if record.path == result.output_dir)
+    assert window.history_page.records[record_index].status == "completed"
+    qtbot.mouseClick(window.history_page.action_button(record_index, "open_combined"), Qt.MouseButton.LeftButton)
+    assert opened[-1] == result.combined_pdf_path
 
 
 def test_issue_action_focuses_exact_table_cell(qtbot, tmp_path, docx_factory):

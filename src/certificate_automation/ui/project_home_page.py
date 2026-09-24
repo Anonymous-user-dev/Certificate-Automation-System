@@ -20,6 +20,8 @@ class ProjectHomePage(QWidget):
     repair_requested = Signal(Path)
     retry_save_requested = Signal()
     return_to_project_requested = Signal()
+    history_requested = Signal()
+    support_requested = Signal()
 
     def __init__(self, catalogs: CatalogSet, parent=None) -> None:
         super().__init__(parent)
@@ -43,6 +45,8 @@ class ProjectHomePage(QWidget):
         self.recent_projects_button = QPushButton()
         self.recover_project_button = QPushButton()
         self.try_example_button = QPushButton()
+        self.history_button = QPushButton()
+        self.support_button = QPushButton()
         for button, name in zip(
             self.primary_buttons(),
             ("newProject", "openProject", "recentProjects", "recoverProject", "tryExample"),
@@ -74,6 +78,8 @@ class ProjectHomePage(QWidget):
         layout.addWidget(self.return_to_project_button)
         layout.addSpacing(12)
         layout.addWidget(card)
+        layout.addWidget(self.history_button)
+        layout.addWidget(self.support_button)
         layout.addWidget(self.recent_scroll, 1)
         self.new_project_button.clicked.connect(self.new_requested)
         self.open_project_button.clicked.connect(self.open_requested)
@@ -82,6 +88,8 @@ class ProjectHomePage(QWidget):
         self.recent_projects_button.clicked.connect(self._focus_recent)
         self.retry_save_button.clicked.connect(self.retry_save_requested)
         self.return_to_project_button.clicked.connect(self.return_to_project_requested)
+        self.history_button.clicked.connect(self.history_requested)
+        self.support_button.clicked.connect(self.support_requested)
         for first, second in zip(self.primary_buttons(), self.primary_buttons()[1:]):
             self.setTabOrder(first, second)
         self.retranslate()
@@ -147,6 +155,8 @@ class ProjectHomePage(QWidget):
         for control, key in (
             (self.retry_save_button, "save_state.retry"),
             (self.return_to_project_button, "home.return_to_project"),
+            (self.history_button, "home.history"),
+            (self.support_button, "home.support"),
         ):
             control.setText(self._catalogs.text(key))
             control.setAccessibleName(control.text())

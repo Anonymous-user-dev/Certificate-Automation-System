@@ -48,6 +48,27 @@ def test_history_matches_normalized_identity_without_plaintext_on_disk(tmp_path)
         assert b"CERT-7" not in path.read_bytes()
 
 
+def test_history_lists_each_published_batch_once_without_recipient_values(tmp_path):
+    index = HistoryIndex(tmp_path / "history.sqlite", MemoryProtector())
+    folder = tmp_path / "Awards-revision-1"
+    index.record_batch(_batch(folder), (
+        HistoryEntry(("Ana García",), "CERT-1"),
+        HistoryEntry(("Bea",), "CERT-2"),
+    ))
+
+    batches = index.list_batches()
+
+    assert batches == (_batch(folder),)
+    assert "Ana" not in repr(batches)
+
+
+def test_history_listing_missing_index_is_unavailable_without_creating_it(tmp_path):
+    index = HistoryIndex(tmp_path / "missing.sqlite", MemoryProtector())
+    with pytest.raises(HistoryError, match="history.unavailable"):
+        index.list_batches()
+    assert not index.path.exists()
+
+
 def test_certificate_id_match_is_keyed_and_reported(tmp_path):
     index = HistoryIndex(tmp_path / "history.sqlite", MemoryProtector())
     index.record(_batch(tmp_path), identities=("Ana",), certificate_id="CERT-7")

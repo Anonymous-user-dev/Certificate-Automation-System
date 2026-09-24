@@ -258,6 +258,26 @@ class HistoryIndex:
         except (OSError, sqlite3.Error, HistoryError, ValueError, TypeError):
             return HistoryCheck(HistoryStatus.UNAVAILABLE, (), "history.unavailable")
 
+    def list_batches(self) -> tuple[PublishedBatch, ...]:
+        """Return privacy-minimal batch metadata without creating an absent index."""
+        if not self.path.is_file():
+            raise HistoryError("history.unavailable")
+        try:
+            with closing(sqlite3.connect(
+                f"{self.path.resolve().as_uri()}?mode=ro", uri=True
+            )) as connection:
+                self._key(connection, create=False)
+                rows = connection.execute(
+                    "SELECT DISTINCT batch_id, revision, completed_at, folder FROM records "
+                    "ORDER BY completed_at DESC, batch_id, revision"
+                ).fetchall()
+                return tuple(
+                    PublishedBatch(batch_id, revision, datetime.fromisoformat(completed_at), Path(folder))
+                    for batch_id, revision, completed_at, folder in rows
+                )
+        except (OSError, sqlite3.Error, ValueError, TypeError) as error:
+            raise HistoryError("history.unavailable") from error
+
     def record(
         self, batch: PublishedBatch, identities: tuple[str, ...], *, certificate_id: str | None = None
     ) -> None:

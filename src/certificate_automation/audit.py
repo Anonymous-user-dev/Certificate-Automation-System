@@ -67,6 +67,7 @@ class AuditContext:
     workflow: Mapping[str, object] | None = None
     page_geometry: Mapping[str, object] | None = None
     export_status: str = "not_exported"
+    lineage: tuple[str, ...] = ()
 
 
 def sha256_file(path: Path) -> str:
@@ -247,6 +248,7 @@ def _write_manifest_v2(context: AuditContext, destination: Path) -> Path:
             "workflow": dict(context.workflow or {}),
             "page_geometry": dict(context.page_geometry or {}),
             "export_status": context.export_status,
+            "lineage": list(context.lineage),
             "artifacts": artifacts,
         })
     return _atomic_write_text(
@@ -281,6 +283,52 @@ def write_summary(
         "</tr>"
         for output in context.outputs
     )
+    audit_details = ""
+    if context.revision_number is not None:
+        counts = {
+            "summary.recipients": len(context.outputs),
+            "summary.word_file": sum(item.docx_path is not None for item in context.outputs),
+            "summary.pdf_file": sum(item.pdf_path is not None for item in context.outputs),
+            "summary.combined_pdf": int(context.combined_pdf is not None),
+            "summary.warnings": len(context.warnings),
+        }
+        workflow = context.workflow or {}
+        snapshot = workflow.get("snapshot", {}) if isinstance(workflow, Mapping) else {}
+        warning_codes = snapshot.get("warning_codes", ()) if isinstance(snapshot, Mapping) else ()
+        facts: list[tuple[str, object]] = [
+            ("summary.revision", context.revision_number),
+            ("summary.approval_digest", context.approval_digest or catalogs.text("summary.none")),
+            ("summary.source_hash", context.source_sha256 or catalogs.text("summary.none")),
+            ("summary.dataset_hash", context.dataset_sha256 or catalogs.text("summary.none")),
+            ("summary.template_hash", sha256_file(context.template_path)),
+            ("summary.export_status", context.export_status),
+            ("summary.lineage", ", ".join(context.lineage) or catalogs.text("summary.none")),
+            ("summary.warning_ack", ", ".join(str(code) for code in warning_codes) or catalogs.text("summary.none")),
+            ("summary.preparer", workflow.get("preparer_name") or catalogs.text("summary.none")),
+            ("summary.reviewer", workflow.get("reviewer_name") or catalogs.text("summary.none")),
+            ("summary.prepared_at", workflow.get("prepared_at") or catalogs.text("summary.none")),
+            ("summary.reviewed_at", workflow.get("reviewed_at") or catalogs.text("summary.none")),
+            ("summary.started_at", context.started_at.isoformat()),
+            ("summary.completed_at", context.completed_at.isoformat()),
+        ]
+        for key in (
+            "application_version", "python_version", "qt_version", "windows_release",
+            "windows_build", "word_version", "converter_version", "filesystem",
+        ):
+            facts.append((f"summary.{key}", (context.platform_report or {}).get(key) or catalogs.text("summary.none")))
+        rows = "".join(
+            f"<tr><th>{escape(catalogs.text(label))}</th><td>{escape(str(value))}</td></tr>"
+            for label, value in facts
+        )
+        count_rows = "".join(
+            f"<tr><th>{escape(catalogs.text(label))}</th><td>{count}</td></tr>"
+            for label, count in counts.items()
+        )
+        audit_details = (
+            f"<h2>{escape(catalogs.text('summary.audit_facts'))}</h2>"
+            f"<table><tbody>{rows}{count_rows}</tbody></table>"
+            f"<p>{escape(catalogs.text('summary.workflow_disclaimer'))}</p>"
+        )
     content = f"""<!doctype html>
 <html lang="{escape(catalogs.locale)}">
 <head>
@@ -311,6 +359,7 @@ def write_summary(
   <h2>{escape(catalogs.text('summary.generated_files'))}</h2>
   <table><thead><tr><th>{escape(catalogs.text('summary.source_row'))}</th><th>{escape(catalogs.text('summary.word_file'))}</th><th>{escape(catalogs.text('summary.pdf_file'))}</th></tr></thead>
     <tbody>{output_rows}</tbody></table>
+  {audit_details}
 </body>
 </html>
 """

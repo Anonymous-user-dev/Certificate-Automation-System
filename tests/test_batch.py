@@ -268,6 +268,24 @@ def test_typed_generation_requires_verified_workflow_approval(tmp_path, docx_fac
     assert not list(request.destination.glob(".certificate-incomplete-*"))
 
 
+def test_official_manifest_and_audit_record_prior_revision_lineage(tmp_path, docx_factory):
+    basic = _typed_request(tmp_path, docx_factory)
+    request = BatchRequest(
+        basic.dataset, basic.template, basic.mappings, basic.outputs, basic.locale,
+        approval_input=basic.approval_input, approval=basic.approval,
+        approval_digest=basic.approval_digest,
+        lineage=("Awards-revision-1",),
+    )
+
+    result = _generator(FakeConverter()).generate(request)
+    manifest = json.loads((result.output_dir / "manifest.json").read_text("utf-8"))
+    html = (result.output_dir / "batch_summary.html").read_text("utf-8")
+
+    assert manifest["lineage"] == ["Awards-revision-1"]
+    assert "Awards-revision-1" in html
+    assert IntegrityService().verify_revision(result.output_dir).valid
+
+
 def test_typed_generation_rejects_request_changed_after_approval(tmp_path, docx_factory):
     request = _typed_request(tmp_path, docx_factory)
     changed = OutputOptions(True, False, False, request.destination, "Awards", request.outputs.row_ids)

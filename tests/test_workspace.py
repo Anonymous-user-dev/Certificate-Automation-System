@@ -171,6 +171,41 @@ def test_home_has_four_clear_primary_actions(workspace):
     assert all(button.isVisible() for button in workspace.home.primary_buttons())
 
 
+def test_home_history_entry_opens_local_history_and_returns_home(workspace, tmp_path):
+    workspace.new_project(tmp_path / "History.certproject")
+    workspace._show_home()
+
+    workspace.home.history_button.click()
+
+    assert workspace.root_stack.currentWidget() is workspace.history_page
+    workspace.history_page.back_button.click()
+    assert workspace.root_stack.currentWidget() is workspace.home
+
+
+def test_home_support_entry_opens_offline_dialog(workspace, monkeypatch):
+    from certificate_automation.ui.support_dialog import SupportDialog
+    seen = []
+    monkeypatch.setattr(SupportDialog, "exec", lambda self: seen.append(self))
+
+    workspace.home.support_button.click()
+
+    assert len(seen) == 1
+    assert not seen[0].include_sensitive.isChecked()
+
+
+def test_published_result_is_recorded_in_project_history(workspace, tmp_path):
+    project_path = tmp_path / "History.certproject"
+    workspace.new_project(project_path)
+    revision = tmp_path / "Awards-revision-1"
+    revision.mkdir()
+
+    workspace._generation_finished(BatchResult(BatchState.PUBLISHED, revision, 1))
+
+    assert str(revision) in workspace._loaded_project.published_revisions
+    assert workspace.coordinator.flush()
+    assert str(revision) in ProjectStore.open(project_path).load().published_revisions
+
+
 def test_output_step_opens_final_approval_before_results(workspace, tmp_path):
     workspace.new_project(tmp_path / "Approval.certproject")
     workspace.state = replace(

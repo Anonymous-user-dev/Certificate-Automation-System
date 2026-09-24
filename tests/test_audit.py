@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
 import json
 
 from certificate_automation.audit import (
@@ -100,3 +101,39 @@ def test_html_summary_escapes_user_controlled_content(tmp_path):
     assert "A <value>" not in content
     assert "Traceback" not in content
     assert "Ana_Garcia.pdf" in content
+
+
+def test_schema_three_audit_shows_frozen_facts_and_escaped_workflow(tmp_path):
+    context = replace(
+        _context(tmp_path),
+        revision_number=4,
+        source_sha256="b" * 64,
+        dataset_sha256="c" * 64,
+        approval_digest="d" * 64,
+        selected_outputs={"docx": True, "individual_pdf": True, "combined_pdf": False},
+        platform_report={
+            "application_version": "3.0.0", "python_version": "3.14.0",
+            "qt_version": "6.11.0", "windows_release": "11", "windows_build": "26100",
+            "word_version": "16.0", "converter_version": "Word 16.0", "filesystem": "NTFS",
+        },
+        workflow={
+            "preparer_name": "Анна <approved>", "prepared_at": "2026-09-20T12:00:00+00:00",
+            "two_person": True, "reviewer_name": "李 & 王", "reviewed_at": "2026-09-20T12:01:00+00:00",
+            "snapshot": {"warning_codes": ["validation.review_value"]},
+        },
+        export_status="not_exported",
+        lineage=("Awards-revision-3",),
+    )
+
+    path = write_summary(context, tmp_path / "batch_summary.html")
+    html = path.read_text("utf-8")
+
+    for fact in ("4", "1", "3.14.0", "6.11.0", "26100", "16.0", "NTFS", "Awards-revision-3", "validation.review_value", "not_exported"):
+        assert fact in html
+    for digest in ("b" * 64, "c" * 64, "d" * 64, sha256_file(context.template_path)):
+        assert digest in html
+    assert "Анна &lt;approved&gt;" in html
+    assert "李 &amp; 王" in html
+    assert "Анна <approved>" not in html
+    assert "李 & 王" not in html
+    assert "not identity verification or a digital signature" in html

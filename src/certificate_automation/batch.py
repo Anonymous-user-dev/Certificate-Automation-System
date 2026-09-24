@@ -106,6 +106,7 @@ class BatchRequest:
     approval: WorkflowApproval | None
     approval_digest: str | None
     revision_number: int | None
+    lineage: tuple[str, ...]
 
     def __init__(
         self,
@@ -122,6 +123,7 @@ class BatchRequest:
         approval: WorkflowApproval | None = None,
         approval_digest: str | None = None,
         revision_number: int | None = None,
+        lineage: tuple[str, ...] = (),
     ) -> None:
         object.__setattr__(self, "dataset", dataset)
         object.__setattr__(self, "template", template)
@@ -135,6 +137,7 @@ class BatchRequest:
         object.__setattr__(self, "approval", approval)
         object.__setattr__(self, "approval_digest", approval_digest)
         object.__setattr__(self, "revision_number", revision_number)
+        object.__setattr__(self, "lineage", tuple(lineage))
 
     @property
     def workbook(self) -> WorkbookData | TabularDataset:
@@ -681,6 +684,7 @@ class BatchGenerator:
                 journal_id=batch_id,
                 platform_report=platform.to_json(),
                 workflow=request.approval.to_json(),
+                lineage=request.lineage,
             )
             write_summary(
                 audit_context,

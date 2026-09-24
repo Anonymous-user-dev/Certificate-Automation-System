@@ -30,6 +30,27 @@ def _safe_name(value: object) -> str | None:
 
 
 class IntegrityService:
+    def verified_artifact(self, revision: Path, kind: str) -> Path | None:
+        """Locate a requested artifact only after the whole revision verifies."""
+        revision = Path(revision)
+        if kind not in {"audit", "combined"} or not self.verify_revision(revision).valid:
+            return None
+        try:
+            manifest = json.loads((revision / "manifest.json").read_text("utf-8"))
+            if kind == "audit":
+                name = "batch_summary.html"
+                if not any(item.get("filename") == name for item in manifest.get("artifacts", [])):
+                    return None
+            else:
+                combined = manifest.get("combined_pdf")
+                name = combined.get("filename") if isinstance(combined, dict) else None
+            if _safe_name(name) is None:
+                return None
+            path = revision / name
+            return path if path.is_file() and not path.is_symlink() else None
+        except (OSError, ValueError, TypeError, AttributeError):
+            return None
+
     def verify_revision(
         self, path: Path, *, allow_ready: bool = False,
         approved_snapshot: ApprovalSnapshot | None = None,

@@ -67,6 +67,13 @@ def test_schema3_manifest_verifies_artifact_bytes_and_order(revision):
     assert IntegrityService().verify_revision(revision).valid
 
 
+def test_verified_audit_path_requires_intact_published_revision(revision):
+    service = IntegrityService()
+    assert service.verified_artifact(revision, "audit") == revision / "batch_summary.html"
+    (revision / "batch_summary.html").write_text("tampered", encoding="utf-8")
+    assert service.verified_artifact(revision, "audit") is None
+
+
 def test_integrity_rejects_extra_file_with_same_name_ignoring_case(revision):
     (revision / "ONE.PDF").write_bytes(b"impostor")
     assert not IntegrityService().verify_revision(revision).valid

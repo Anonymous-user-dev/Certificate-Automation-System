@@ -35,11 +35,15 @@ from PySide6.QtWidgets import (
 
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
 from certificate_automation.approval import ApprovalInput, ApprovalService, WorkflowApproval
-from certificate_automation.domain import Severity
+from certificate_automation.domain import BatchState, Severity
 from certificate_automation.batch import BatchRequest, CancellationToken
 from certificate_automation.i18n import CatalogError, CatalogSet, SUPPORTED_LOCALES, package_root
 from certificate_automation.mapping import MappingPlan, evaluate_plan
 from certificate_automation.history import DuplicatePolicy
+from certificate_automation.diagnostics import DiagnosticBundleService, DiagnosticContext
+from certificate_automation.integrity import IntegrityService
+from certificate_automation.platform_report import PlatformReport
+from certificate_automation import __version__
 from certificate_automation.profiles import MappingProfile, ProfileError, ProfileStore, compare_profile
 from certificate_automation.output_options import OutputOptions
 from certificate_automation.project import ProjectCoordinator, ProjectError, ProjectSaveError, ProjectState, ProjectStore
@@ -49,6 +53,8 @@ from certificate_automation.template import Placeholder, TemplateInspection, ins
 from certificate_automation.template_health import TemplateHealthService
 from certificate_automation.validation import ValidationReport, validate_preflight
 from certificate_automation.ui.project_home_page import ProjectHomePage
+from certificate_automation.ui.history_page import HistoryPage
+from certificate_automation.ui.support_dialog import SupportDialog
 from certificate_automation.ui.data_page import DataPage, ImportPreviewDialog
 from certificate_automation.ui.match_page import MatchPage
 from certificate_automation.ui.output_page import OutputPage
@@ -243,6 +249,10 @@ class WorkspaceWindow(QMainWindow):
         self.root_stack.addWidget(self.home)
         self.workspace_surface = self._build_workspace()
         self.root_stack.addWidget(self.workspace_surface)
+        self.history_page = HistoryPage(
+            self.catalogs, history_index=getattr(services, "history_index", None),
+        )
+        self.root_stack.addWidget(self.history_page)
         self.setCentralWidget(self.root_stack)
         self.resize(1120, 760)
         self.setMinimumSize(620, 520)
@@ -256,6 +266,11 @@ class WorkspaceWindow(QMainWindow):
         self.home.repair_requested.connect(self._repair_recent_project)
         self.home.retry_save_requested.connect(self._retry_save)
         self.home.return_to_project_requested.connect(self._return_to_project)
+        self.home.history_requested.connect(self._show_history)
+        self.home.support_requested.connect(self._open_support_dialog)
+        self.history_page.back_requested.connect(self._show_home)
+        self.history_page.open_path_requested.connect(self._open_history_path)
+        self.history_page.correction_requested.connect(self._correct_from_history)
         self.home_button.clicked.connect(self._show_home)
         self.retry_save_button.clicked.connect(self._retry_save)
         self.step_rail.step_requested.connect(self.navigate)
@@ -927,6 +942,64 @@ class WorkspaceWindow(QMainWindow):
     def _return_to_project(self) -> None:
         if self.state.project_path is not None:
             self.root_stack.setCurrentWidget(self.workspace_surface)
+
+    def _show_history(self) -> None:
+        if self._block_project_switch_while_generating():
+            return
+        outputs = self.project_state.outputs
+        destination = (
+            outputs.destination if outputs is not None else
+            self.state.project_path.parent if self.state.project_path is not None else None
+        )
+        if destination is None:
+            selected = QFileDialog.getExistingDirectory(self, self.catalogs.text("home.history"))
+            if not selected:
+                return
+            destination = Path(selected)
+        published = tuple(Path(path) for path in self._loaded_project.published_revisions) if self._loaded_project else ()
+        result = self.results_page.result if self.results_page.state == "published" else None
+        if result is not None and result.output_dir is not None:
+            published += (Path(result.output_dir),)
+        self.history_page.load(Path(destination), published_paths=published)
+        self.root_stack.setCurrentWidget(self.history_page)
+
+    def _open_history_path(self, path: Path) -> None:
+        opener = getattr(self.services, "open_path", None)
+        if not callable(opener) or not opener(path):
+            self.history_page.status_label.setText(self.catalogs.text("history.open_failed"))
+
+    def _correct_from_history(self, path: Path) -> None:
+        project = self._loaded_project
+        if (
+            self._read_only or project is None or
+            str(path) not in project.published_revisions or
+            not IntegrityService().verify_revision(path).valid
+        ):
+            self.history_page.status_label.setText(self.catalogs.text("history.correct_open_project"))
+            return
+        self._loaded_project = IntegrityService().clone_for_correction(project, path)
+        self._invalidate_approval()
+        self.state = replace(
+            self.state, project_revision=self._loaded_project.revision,
+            completed_steps=tuple(step for step in self.state.completed_steps if step not in {"approval", "generate"}),
+        )
+        self._mark_project_dirty()
+        self.root_stack.setCurrentWidget(self.workspace_surface)
+        self.navigate("review")
+
+    def _open_support_dialog(self) -> None:
+        context = DiagnosticContext(
+            application_version=__version__,
+            project_path=self.state.project_path,
+            issue_codes=(self._last_issue_code,) if self._last_issue_code else (),
+            exception_text=str(self.results_page.error) if self.results_page.error is not None else None,
+            configuration=self.project_state.plan.to_json() if self.project_state.plan else {},
+            platform_report=PlatformReport.inspect_volume(
+                self.state.project_path.parent if self.state.project_path else Path.cwd()
+            ).to_json(),
+        )
+        dialog = SupportDialog(self.catalogs, DiagnosticBundleService(), context, self)
+        dialog.exec()
 
     def _show_step(self, step: str) -> None:
         changed = step != self.state.current_step
@@ -1895,6 +1968,8 @@ class WorkspaceWindow(QMainWindow):
             approval_input=approval_input,
             approval=self._approval,
             approval_digest=self._approval.snapshot.digest,
+            lineage=tuple(Path(path).name for path in self._loaded_project.published_revisions)
+            if self._loaded_project is not None else (),
         )
         self.mark_step_complete("approval")
         self.navigate("generate")
@@ -1921,6 +1996,18 @@ class WorkspaceWindow(QMainWindow):
         thread.start()
 
     def _generation_finished(self, result) -> None:
+        if (
+            result.state is BatchState.PUBLISHED and result.output_dir is not None
+            and self._loaded_project is not None and self.coordinator is not None
+        ):
+            folder = str(Path(result.output_dir))
+            if folder not in self._loaded_project.published_revisions:
+                self._loaded_project = replace(
+                    self._loaded_project,
+                    published_revisions=self._loaded_project.published_revisions + (folder,),
+                )
+                self.state = replace(self.state, project_revision=self.state.project_revision + 1)
+                self._mark_project_dirty()
         outputs = self.project_state.outputs
         self.results_page.set_expected_combined(
             bool(outputs and outputs.combined_pdf)
