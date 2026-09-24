@@ -17,6 +17,7 @@ from types import MappingProxyType
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
+from certificate_automation.history import DuplicatePolicy, HistoryError
 
 
 SCHEMA_VERSION = 2
@@ -59,6 +60,7 @@ class ProjectState:
     approval: Mapping[str, object] | None = None
     published_revisions: tuple[str, ...] = ()
     print_settings: Mapping[str, object] | None = None
+    duplicate_policy: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if self.revision < 0:
@@ -81,6 +83,8 @@ class ProjectState:
         )
         object.__setattr__(self, "approval", _frozen_json_mapping(self.approval))
         object.__setattr__(self, "print_settings", _frozen_json_mapping(self.print_settings))
+        policy = DuplicatePolicy.from_json(dict(self.duplicate_policy or {}))
+        object.__setattr__(self, "duplicate_policy", _frozen_json_mapping(policy.to_json()))
         object.__setattr__(
             self,
             "template_path",
@@ -134,6 +138,7 @@ class ProjectState:
             "approval": _plain_json(self.approval),
             "published_revisions": list(self.published_revisions),
             "print_settings": _plain_json(self.print_settings),
+            "duplicate_policy": _plain_json(self.duplicate_policy),
         }
 
     @classmethod
@@ -157,6 +162,7 @@ class ProjectState:
             approval=payload.get("approval"),
             published_revisions=tuple(payload.get("published_revisions", ())),
             print_settings=payload.get("print_settings"),
+            duplicate_policy=payload.get("duplicate_policy"),
         )
 
 
@@ -293,7 +299,7 @@ class ProjectStore:
             try:
                 payload = json.loads(payload_text)
                 return ProjectState.from_payload(payload)
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError, HistoryError):
                 continue
         raise ProjectCorruptError("project.no_valid_revision")
 

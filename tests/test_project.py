@@ -1,6 +1,7 @@
 from contextlib import closing
 from datetime import datetime, timezone
 from hashlib import sha256
+import json
 import sqlite3
 
 from PySide6.QtTest import QSignalSpy
@@ -217,6 +218,43 @@ def test_schema2_project_fields_survive_round_trip(tmp_path):
     assert reopened.approval == {"digest": "abc", "reviewer": "Mira"}
     assert reopened.published_revisions == ("batch-001", "batch-002")
     assert reopened.print_settings == {"duplex": True, "copies": 2}
+
+
+def test_duplicate_policy_survives_project_round_trip_with_safe_legacy_default(tmp_path):
+    state = ProjectState(
+        revision=1, dataset=_dataset(),
+        duplicate_policy={
+            "certificate_id_column": "certificate_id",
+            "identity_columns": ["full_name", "birth_date"],
+            "check_history": True,
+        },
+    )
+    store = ProjectStore.create(tmp_path / "duplicate-policy.certproject")
+    store.save(state)
+    assert ProjectStore.open(store.path).load().duplicate_policy == state.duplicate_policy
+
+    old_payload = state.to_payload()
+    old_payload.pop("duplicate_policy")
+    assert ProjectState.from_payload(old_payload).duplicate_policy == {
+        "certificate_id_column": None, "identity_columns": [], "check_history": False,
+    }
+
+
+def test_invalid_latest_duplicate_policy_falls_back_to_last_valid_revision(tmp_path):
+    store = ProjectStore.create(tmp_path / "policy-corrupt.certproject")
+    store.save(_state(tmp_path, revision=1))
+    store.save(_state(tmp_path, revision=2))
+    with sqlite3.connect(store.path) as connection:
+        payload = json.loads(connection.execute(
+            "SELECT payload_json FROM revisions WHERE revision=2"
+        ).fetchone()[0])
+        payload["duplicate_policy"] = {"identity_columns": "full_name", "check_history": True}
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        connection.execute(
+            "UPDATE revisions SET payload_json=?, payload_sha256=? WHERE revision=2",
+            (encoded, sha256(encoded.encode("utf-8")).hexdigest()),
+        )
+    assert ProjectStore.open(store.path).load().revision == 1
 
 
 def test_schema1_payload_reads_with_safe_defaults(tmp_path):

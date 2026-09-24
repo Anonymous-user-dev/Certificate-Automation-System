@@ -14,6 +14,7 @@ import unicodedata
 from certificate_automation.dataset import TabularDataset
 from certificate_automation.domain import Issue, Severity
 from certificate_automation.filenames import RESERVED_NAMES, safe_stem
+from certificate_automation.history import DuplicatePolicy, HistoryIndex, HistoryStatus, normalize_identity
 from certificate_automation.mapping import (
     ColumnValue,
     FormattedDateValue,
@@ -59,13 +60,19 @@ def validate_preflight(
     template: TemplateInspection,
     mappings: MappingSelection | MappingPlan,
     destination: Path | OutputOptions,
+    *,
+    duplicate_policy: DuplicatePolicy | None = None,
+    history_index: HistoryIndex | None = None,
 ) -> ValidationReport:
     """Return every actionable issue without creating certificate outputs."""
 
     if isinstance(workbook, TabularDataset):
         if not isinstance(mappings, MappingPlan) or not isinstance(destination, OutputOptions):
             raise TypeError("TabularDataset validation requires MappingPlan and OutputOptions")
-        return _validate_dataset(workbook, template, mappings, destination)
+        return _validate_dataset(
+            workbook, template, mappings, destination,
+            duplicate_policy or DuplicatePolicy(), history_index,
+        )
     if not isinstance(mappings, MappingSelection) or isinstance(destination, OutputOptions):
         raise TypeError("WorkbookData validation requires MappingSelection and destination")
     return _validate_legacy(workbook, template, mappings, Path(destination))
@@ -229,6 +236,8 @@ def _validate_dataset(
     template: TemplateInspection,
     plan: MappingPlan,
     options: OutputOptions,
+    duplicate_policy: DuplicatePolicy,
+    history_index: HistoryIndex | None,
 ) -> ValidationReport:
     """Validate the complete immutable dataset before any official output exists."""
 
@@ -279,6 +288,18 @@ def _validate_dataset(
         None,
     )
     column_ids = {column.column_id for column in dataset.columns}
+    identity_columns = duplicate_policy.identity_columns
+    missing_identity = tuple(column for column in identity_columns if column not in column_ids)
+    for column in missing_identity:
+        issues.append(_error("validation.unknown_identity_column", "dataset", {"column": column}, column_id=column))
+    certificate_column = duplicate_policy.certificate_id_column
+    if certificate_column is not None and certificate_column not in column_ids:
+        issues.append(_error("validation.unknown_certificate_id_column", "dataset", {"column": certificate_column}, column_id=certificate_column))
+    if duplicate_policy.check_history and not identity_columns and certificate_column is None:
+        issues.append(_error("validation.history_identity_required", "dataset"))
+    seen_identities: dict[tuple[str, ...], str] = {}
+    certificate_groups: dict[str, list[str]] = {}
+    history_unavailable_reported = False
 
     for placeholder, source in plan.sources.items():
         referenced = _referenced_columns(source)
@@ -298,6 +319,55 @@ def _validate_dataset(
             continue
         row = dataset.row(row_id)
         display_row = row.source_row if row.source_row is not None else dataset.order.index(row_id) + 1
+        selected_identity: tuple[str, ...] = ()
+        if identity_columns and not missing_identity:
+            selected_identity = tuple(normalize_identity(row.value(column)) for column in identity_columns)
+            if all(selected_identity):
+                first_id = seen_identities.get(selected_identity)
+                if first_id is not None:
+                    issues.append(_warning(
+                        "validation.identity_duplicate", "dataset",
+                        {"row": display_row, "first_row": _display_row(dataset, first_id)},
+                        row_id=row_id,
+                    ))
+                else:
+                    seen_identities[selected_identity] = row_id
+            else:
+                for column, value in zip(identity_columns, selected_identity):
+                    if not value:
+                        issues.append(_error(
+                            "validation.blank_identity", "dataset",
+                            {"row": display_row, "column": column},
+                            row_id=row_id, column_id=column,
+                        ))
+        certificate_id: str | None = None
+        if certificate_column is not None and certificate_column in column_ids:
+            certificate_id = normalize_identity(row.value(certificate_column))
+            if certificate_id:
+                certificate_groups.setdefault(certificate_id, []).append(row_id)
+            else:
+                issues.append(_error(
+                    "validation.blank_certificate_id", "dataset", {"row": display_row},
+                    row_id=row_id, column_id=certificate_column,
+                ))
+        if duplicate_policy.check_history:
+            if history_index is None:
+                if not history_unavailable_reported:
+                    issues.append(_warning("history.unavailable", "history"))
+                    history_unavailable_reported = True
+            elif (selected_identity and all(selected_identity)) or certificate_id:
+                check = history_index.check(selected_identity, certificate_id=certificate_id)
+                if check.status is HistoryStatus.UNAVAILABLE:
+                    if not history_unavailable_reported:
+                        issues.append(_warning("history.unavailable", "history"))
+                        history_unavailable_reported = True
+                else:
+                    for match in check.matches:
+                        issues.append(_warning(
+                            "validation.history_duplicate", "history",
+                            {"row": display_row, "batch": match.batch_id},
+                            row_id=row_id,
+                        ))
         replacements: dict[str, str] = {}
         for placeholder, source in plan.sources.items():
             try:
@@ -411,6 +481,16 @@ def _validate_dataset(
                     column_id=_primary_column(plan.sources.get(full_name_placeholder)),
                 )
             )
+
+    for row_ids in certificate_groups.values():
+        if len(row_ids) < 2:
+            continue
+        for row_id in row_ids:
+            issues.append(_error(
+                "validation.certificate_id_collision", "dataset",
+                {"row": _display_row(dataset, row_id)},
+                row_id=row_id, column_id=certificate_column,
+            ))
 
     estimated_bytes = _estimate_dataset_working_space(dataset, template, options)
     source_paths = tuple(
@@ -560,3 +640,13 @@ def _error(
         row_id=row_id,
         column_id=column_id,
     )
+
+
+def _warning(
+    code: str,
+    source: str,
+    parameters: Mapping[str, str | int] | None = None,
+    *,
+    row_id: str | None = None,
+) -> Issue:
+    return Issue(Severity.WARNING, source, code, parameters or {}, row_id=row_id)

@@ -9,6 +9,7 @@ import pytest
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
 from certificate_automation.domain import Recipient
 from certificate_automation.filenames import MAX_STEM_LENGTH, RESERVED_NAMES, safe_stem
+from certificate_automation.history import DuplicatePolicy, HistoryIndex, PublishedBatch
 from certificate_automation.mapping import (
     ColumnValue,
     FormattedDateValue,
@@ -275,6 +276,96 @@ def test_unicode_normalization_filename_collision_blocks_both_rows(tmp_path):
 
     collisions = [item for item in report.issues if item.code == "output.filename_collision"]
     assert {item.row_id for item in collisions} == {"row-1", "row-2"}
+
+
+def test_selected_identity_duplicate_is_warning_requiring_acknowledgement(tmp_path):
+    dataset = _canonical_dataset(" Ana ", "ANA")
+    report = validate_preflight(
+        dataset, _typed_template(tmp_path),
+        MappingPlan({"FULL_NAME": ColumnValue("full_name"), "DATE": ColumnValue("date")}),
+        _typed_options(tmp_path, dataset),
+        duplicate_policy=DuplicatePolicy(None, ("full_name",), False),
+    )
+    matches = [issue for issue in report.issues if issue.code == "validation.identity_duplicate"]
+    assert len(matches) == 1
+    assert matches[0].row_id == "row-2"
+    assert matches[0].severity.value == "warning"
+
+
+def test_exact_certificate_id_collision_blocks_batch(tmp_path):
+    source = _canonical_dataset("Ana", "Bea")
+    dataset = replace(source,
+        columns=source.columns + (Column("certificate_id", "Certificate ID"),),
+        rows=tuple(replace(row, values={**row.values, "certificate_id": "ABC-1"},
+                           display_values={**row.display_values, "certificate_id": "ABC-1"})
+                   for row in source.rows))
+    report = validate_preflight(
+        dataset, _typed_template(tmp_path),
+        MappingPlan({"FULL_NAME": ColumnValue("full_name"), "DATE": ColumnValue("date")}),
+        _typed_options(tmp_path, dataset),
+        duplicate_policy=DuplicatePolicy("certificate_id", ("full_name",), False),
+    )
+    assert {issue.row_id for issue in report.issues if issue.code == "validation.certificate_id_collision"} == {"row-1", "row-2"}
+    assert report.ready is False
+
+
+def test_unavailable_history_warns_instead_of_reporting_clean(tmp_path):
+    dataset = _canonical_dataset("Ana")
+    report = validate_preflight(
+        dataset, _typed_template(tmp_path),
+        MappingPlan({"FULL_NAME": ColumnValue("full_name"), "DATE": ColumnValue("date")}),
+        _typed_options(tmp_path, dataset),
+        duplicate_policy=DuplicatePolicy(None, ("full_name",), True),
+    )
+    assert any(issue.code == "history.unavailable" and issue.severity.value == "warning"
+               for issue in report.issues)
+
+
+def test_history_check_without_identity_fields_is_configuration_error(tmp_path):
+    dataset = _canonical_dataset("Ana")
+    report = validate_preflight(
+        dataset, _typed_template(tmp_path),
+        MappingPlan({"FULL_NAME": ColumnValue("full_name"), "DATE": ColumnValue("date")}),
+        _typed_options(tmp_path, dataset),
+        duplicate_policy=DuplicatePolicy(None, (), True),
+    )
+    assert any(issue.code == "validation.history_identity_required" and issue.blocking
+               for issue in report.issues)
+
+
+def test_blank_selected_identity_is_not_silently_skipped(tmp_path):
+    dataset = _canonical_dataset("Ana").with_cell("row-1", "full_name", "")
+    report = validate_preflight(
+        dataset, _typed_template(tmp_path),
+        MappingPlan({"FULL_NAME": ColumnValue("full_name"), "DATE": ColumnValue("date")}),
+        _typed_options(tmp_path, dataset),
+        duplicate_policy=DuplicatePolicy(None, ("full_name",), True),
+    )
+    assert any(issue.code == "validation.blank_identity" and issue.blocking
+               for issue in report.issues)
+
+
+def test_historical_identity_match_warns_for_affected_row(tmp_path):
+    class MemoryProtector:
+        def protect(self, value, *, purpose):
+            return value[::-1]
+        def unprotect(self, value, *, purpose):
+            return value[::-1]
+
+    history = HistoryIndex(tmp_path / "history.sqlite", MemoryProtector())
+    history.record(PublishedBatch("old", 1, datetime(2026, 9, 21, tzinfo=timezone.utc), tmp_path / "published"),
+                   identities=("Ana",))
+    dataset = _canonical_dataset("Ana", "Bea")
+    report = validate_preflight(
+        dataset, _typed_template(tmp_path),
+        MappingPlan({"FULL_NAME": ColumnValue("full_name"), "DATE": ColumnValue("date")}),
+        _typed_options(tmp_path, dataset),
+        duplicate_policy=DuplicatePolicy(None, ("full_name",), True),
+        history_index=history,
+    )
+    assert [(issue.code, issue.row_id, issue.severity.value) for issue in report.issues
+            if issue.code == "validation.history_duplicate"] == [
+                ("validation.history_duplicate", "row-1", "warning")]
 
 
 @pytest.mark.parametrize(
