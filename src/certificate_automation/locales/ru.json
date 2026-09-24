@@ -390,7 +390,7 @@
   "nav.approval": "Итоговое утверждение",
   "approval.title": "Итоговое утверждение",
   "approval.explanation": "Проверьте точный состав пакета перед выдачей официальных документов. Имена фиксируют действия в процессе, но не подтверждают личность и не являются цифровой подписью.",
-  "approval.summary": "Получателей: {recipients}; исключено строк: {excluded}. Шаблон: {template} (SHA-256 {template_hash}…). DOCX: {docx}; отдельных PDF: {pdf}; объединённых PDF: {combined}; страниц-разделителей: {separator}; манифестов: {manifest}; отчётов: {report}. Предупреждений: {warnings}; проверено предварительных образцов: {previews}; ожидается страниц в общем PDF: {pages}. Папка: {destination}; предлагаемая папка версии: {revision_folder}. Сопоставлено полей: {mapping}; параметры печати: {print_settings}. Word: {word}; конвертер: {converter}.",
+  "approval.summary": "Получателей: {recipients}; исключено строк: {excluded}. Шаблон: {template} (SHA-256 {template_hash}). DOCX: {docx}; отдельных PDF: {pdf}; объединённых PDF: {combined}; страниц-разделителей: {separator}; манифестов: {manifest}; отчётов: {report}. Предупреждений: {warnings}; проверено предварительных образцов: {previews}; ожидается страниц в общем PDF: {pages}. Папка: {destination}; предлагаемая папка версии: {revision_folder}. Сопоставлено полей: {mapping}; параметры печати: {print_settings}. Word: {word}; конвертер: {converter}.",
   "approval.revision_pending": "Certificate Batch (новый идентификатор назначается при создании)",
   "approval.source_changed": "Исходный файл данных отсутствует или изменился. Импортируйте данные заново либо подтвердите текущую таблицу перед утверждением.",
   "approval.word_yes": "доступен",

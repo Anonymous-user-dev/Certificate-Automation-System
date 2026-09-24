@@ -390,7 +390,7 @@
   "nav.approval": "最终审批",
   "approval.title": "最终审批",
   "approval.explanation": "签发正式文件前，请核对这批文件的确切内容。此处姓名仅记录工作流程操作，不验证身份，也不构成数字签名。",
-  "approval.summary": "收件人数：{recipients}；排除行数：{excluded}。模板：{template}（SHA-256 {template_hash}…）。DOCX：{docx}；单独 PDF：{pdf}；合并 PDF：{combined}；分隔页：{separator}；清单：{manifest}；报告：{report}。警告：{warnings}；已查看代表性预览：{previews}；预计合并页数：{pages}。目标文件夹：{destination}；拟建版本文件夹：{revision_folder}。映射字段：{mapping}；打印设置：{print_settings}。Word：{word}；转换器：{converter}。",
+  "approval.summary": "收件人数：{recipients}；排除行数：{excluded}。模板：{template}（SHA-256 {template_hash}）。DOCX：{docx}；单独 PDF：{pdf}；合并 PDF：{combined}；分隔页：{separator}；清单：{manifest}；报告：{report}。警告：{warnings}；已查看代表性预览：{previews}；预计合并页数：{pages}。目标文件夹：{destination}；拟建版本文件夹：{revision_folder}。映射字段：{mapping}；打印设置：{print_settings}。Word：{word}；转换器：{converter}。",
   "approval.revision_pending": "Certificate Batch（生成时分配新编号）",
   "approval.source_changed": "原始数据文件缺失或已更改。请重新导入，或在审批前确认当前表格。",
   "approval.word_yes": "可用",

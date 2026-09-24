@@ -390,7 +390,7 @@
   "nav.approval": "Final approval",
   "approval.title": "Final approval",
   "approval.explanation": "Check this exact batch before issuing official documents. Names here record workflow actions; they do not verify identity or create a digital signature.",
-  "approval.summary": "Recipients: {recipients}; excluded rows: {excluded}. Template: {template} (SHA-256 {template_hash}…). DOCX: {docx}; individual PDFs: {pdf}; combined PDFs: {combined}; separator pages: {separator}; manifests: {manifest}; reports: {report}. Warnings: {warnings}; representative previews reviewed: {previews}; expected combined pages: {pages}. Destination: {destination}; proposed revision folder: {revision_folder}. Mapped fields: {mapping}; print settings: {print_settings}. Word: {word}; converter: {converter}.",
+  "approval.summary": "Recipients: {recipients}; excluded rows: {excluded}. Template: {template} (SHA-256 {template_hash}). DOCX: {docx}; individual PDFs: {pdf}; combined PDFs: {combined}; separator pages: {separator}; manifests: {manifest}; reports: {report}. Warnings: {warnings}; representative previews reviewed: {previews}; expected combined pages: {pages}. Destination: {destination}; proposed revision folder: {revision_folder}. Mapped fields: {mapping}; print settings: {print_settings}. Word: {word}; converter: {converter}.",
   "approval.revision_pending": "Certificate Batch (new ID assigned when generated)",
   "approval.source_changed": "The original data file is missing or changed. Re-import or confirm the current table before approval.",
   "approval.word_yes": "available",

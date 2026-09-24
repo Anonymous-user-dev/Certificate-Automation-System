@@ -1,5 +1,7 @@
 from dataclasses import replace
 
+from PySide6.QtCore import Qt
+
 from certificate_automation.approval import ApprovalService
 from certificate_automation.i18n import CatalogSet, package_root
 from certificate_automation.ui.approval_page import ApprovalPage
@@ -14,10 +16,15 @@ def test_page_shows_exact_batch_facts_and_blocks_until_freeze(qtbot, approval_in
     text = page.summary_label.text()
     for value in (
         "1", "0", "2", "Batch-revision-001", "official.docx",
-        approval_input.template_sha256[:12], approval_input.destination,
+        approval_input.template_sha256, approval_input.destination,
         "Microsoft Word",
     ):
         assert value in text
+    assert page.summary_label.accessibleName() == text
+    assert page.summary_label.wordWrap()
+    selectable = page.summary_label.textInteractionFlags()
+    assert selectable & Qt.TextInteractionFlag.TextSelectableByMouse
+    assert selectable & Qt.TextInteractionFlag.TextSelectableByKeyboard
     assert not page.generate_button.isEnabled()
     page.preparer_name.setText("Alice")
     assert page.freeze_button.isEnabled()

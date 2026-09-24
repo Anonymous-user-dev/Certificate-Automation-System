@@ -40,3 +40,11 @@ All commands ran in `/home/faridun/projects/certificate_automation/.worktrees/op
 ## Limitations
 
 The ten Windows-specific packaged/release/Word acceptance tests are skipped in this Linux run (six require a packaged executable; four require Windows). Native Word and installer acceptance remain pending the Windows release task.
+
+## Review fix round 1 — full template hash visibility
+
+- Added to the real `ApprovalPage` test: require the entire template SHA-256, an accessible name equal to the visible summary text, word wrapping, and mouse/keyboard text selection.
+- RED: `test_page_shows_exact_batch_facts_and_blocks_until_freeze` failed because the rendered summary contained only `cccccccccccc…` instead of the complete 64-character digest.
+- GREEN: pass the complete digest to the summary in English, Russian, and Simplified Chinese; remove truncation ellipses; make the summary selectable and set its accessible name to the exact summary text. The targeted page test passed (`1 passed`).
+- Review-fix focused approval/page/workspace/operator/i18n suite: `182 passed`.
+- Review-fix full non-Word suite: `491 passed, 6 skipped, 4 deselected`.

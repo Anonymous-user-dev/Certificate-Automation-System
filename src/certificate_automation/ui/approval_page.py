@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QCheckBox, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from certificate_automation.approval import ApprovalInput, ApprovalService, WorkflowApproval
@@ -29,6 +29,10 @@ class ApprovalPage(QWidget):
         self.explanation.setWordWrap(True)
         self.summary_label = QLabel()
         self.summary_label.setWordWrap(True)
+        self.summary_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
         self.acknowledgement_label = QLabel()
         self.acknowledgement_label.setWordWrap(True)
         self.preparer_name = QLineEdit()
@@ -123,12 +127,12 @@ class ApprovalPage(QWidget):
         if inputs is None:
             return
         count = inputs.output_counts
-        self.summary_label.setText(self._catalogs.text(
+        summary = self._catalogs.text(
             "approval.summary",
             recipients=inputs.recipient_count,
             excluded=inputs.excluded_count,
             template=inputs.template_name,
-            template_hash=inputs.template_sha256[:12],
+            template_hash=inputs.template_sha256,
             docx=count.get("docx", 0),
             pdf=count.get("pdf", 0),
             combined=count.get("combined", 0),
@@ -144,7 +148,9 @@ class ApprovalPage(QWidget):
             converter=inputs.converter_identity,
             mapping=len(inputs.mapping),
             print_settings=str(dict(inputs.print_settings)),
-        ))
+        )
+        self.summary_label.setText(summary)
+        self.summary_label.setAccessibleName(summary)
 
     def _refresh(self) -> None:
         inputs = self._inputs
