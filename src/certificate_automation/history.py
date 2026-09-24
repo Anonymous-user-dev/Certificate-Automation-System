@@ -6,12 +6,14 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from functools import wraps
 import hashlib
 import hmac
 import json
 import os
 from pathlib import Path
 import sqlite3
+from threading import RLock
 import unicodedata
 
 from certificate_automation.windows_protection import ByteProtector, ProtectionError
@@ -20,6 +22,15 @@ from certificate_automation.windows_protection import ByteProtector, ProtectionE
 SCHEMA_VERSION = 1
 KEY_PURPOSE = "history-key"
 KEY_TEST = b"certificate-automation-history-v1"
+_WRITE_LOCK = RLock()
+
+
+def _serialized_write(method):
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with _WRITE_LOCK:
+            return method(self, *args, **kwargs)
+    return wrapper
 
 
 class HistoryError(RuntimeError):
@@ -128,8 +139,9 @@ class HistoryIndex:
         self.path = Path(path)
         self.protector = protector
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=15)
+    def _connect(self, *, create_missing: bool = True) -> sqlite3.Connection:
+        target = self.path if create_missing else f"{self.path.resolve().as_uri()}?mode=rw"
+        connection = sqlite3.connect(target, timeout=15, uri=not create_missing)
         connection.execute("PRAGMA busy_timeout=15000")
         connection.execute("PRAGMA synchronous=FULL")
         return connection
@@ -192,10 +204,12 @@ class HistoryIndex:
             (str(SCHEMA_VERSION).encode("ascii"),),
         )
 
-    def _open_write(self) -> tuple[sqlite3.Connection, bool]:
+    def _open_write(self, *, create_missing: bool = True) -> tuple[sqlite3.Connection, bool]:
+        if not create_missing and not self.path.is_file():
+            raise HistoryError("history.unavailable")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        new_file = not self.path.exists()
-        connection = self._connect()
+        new_file = create_missing and not self.path.exists()
+        connection = self._connect(create_missing=create_missing)
         try:
             connection.execute("BEGIN IMMEDIATE")
             # A second writer may have initialized the database while we waited.
@@ -216,10 +230,13 @@ class HistoryIndex:
             not identities and not certificate_id
         ) or (certificate_id is not None and not normalize_identity(certificate_id)):
             return HistoryCheck(HistoryStatus.UNAVAILABLE, (), "history.unavailable")
+        if not self.path.is_file():
+            return HistoryCheck(HistoryStatus.UNAVAILABLE, (), "history.unavailable")
         try:
-            connection, new_file = self._open_write()
-            with closing(connection), connection:
-                key = self._key(connection, create=new_file)
+            with closing(sqlite3.connect(
+                f"{self.path.resolve().as_uri()}?mode=ro", uri=True
+            )) as connection:
+                key = self._key(connection, create=False)
                 matches: list[DuplicateMatch] = []
                 queries: list[tuple[str, str]] = []
                 if identities and all(normalize_identity(value) for value in identities):
@@ -246,6 +263,7 @@ class HistoryIndex:
     ) -> None:
         self.record_batch(batch, (HistoryEntry(tuple(identities), certificate_id),))
 
+    @_serialized_write
     def record_batch(self, batch: PublishedBatch, entries: tuple[HistoryEntry, ...]) -> None:
         """Index every published recipient in one durable transaction."""
         if not entries:
@@ -296,9 +314,10 @@ class HistoryIndex:
         except (OSError, sqlite3.Error) as error:
             raise HistoryError("history.record_failed") from error
 
+    @_serialized_write
     def clear(self) -> None:
         try:
-            connection, new_file = self._open_write()
+            connection, new_file = self._open_write(create_missing=False)
             with closing(connection), connection:
                 self._key(connection, create=new_file)
                 connection.execute("DELETE FROM records")

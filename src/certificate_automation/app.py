@@ -11,11 +11,13 @@ import shutil
 import sys
 import tempfile
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, QStandardPaths
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from certificate_automation.batch import BatchGenerator
 from certificate_automation.filenames import safe_stem
+from certificate_automation.history import HistoryIndex
+from certificate_automation.windows_protection import DpapiProtector
 from certificate_automation.i18n import CatalogSet, package_root, validate_catalogs
 from certificate_automation.local_open import open_local_path
 from certificate_automation.importers.clipboard import (
@@ -158,11 +160,19 @@ class ApplicationServices:
     template_health_service: TemplateHealthService | None = None
     create_example: Callable[[Path], Path] | None = None
     example_root: Path | None = None
+    history_index: HistoryIndex | None = None
 
 
 def create_default_services(locale: str = "en") -> ApplicationServices:
     converter = WordPdfConverter()
     preview_generator = PreviewGenerator(converter)
+    history_location = QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.AppLocalDataLocation
+    )
+    history_index = (
+        HistoryIndex(Path(history_location) / "duplicate-history.sqlite", DpapiProtector())
+        if history_location else None
+    )
     return ApplicationServices(
         list_worksheets=list_worksheets,
         load_workbook=load_workbook_data,
@@ -171,6 +181,7 @@ def create_default_services(locale: str = "en") -> ApplicationServices:
         validate=validate_preflight,
         preview=preview_generator.generate,
         batch_generator=BatchGenerator(converter),
+        history_index=history_index,
         open_path=open_local_path,
         confirm_generation=lambda parent: QMessageBox.question(
             parent,

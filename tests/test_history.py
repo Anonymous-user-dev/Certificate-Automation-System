@@ -62,6 +62,17 @@ def test_empty_history_query_never_claims_no_duplicates(tmp_path):
     assert not index.path.exists()
 
 
+def test_missing_index_is_unavailable_and_check_does_not_create_it(tmp_path):
+    path = tmp_path / "history.sqlite"
+    index = HistoryIndex(path, MemoryProtector())
+    assert index.check(("Ana",)).status is HistoryStatus.UNAVAILABLE
+    assert not path.exists()
+    index.record(_batch(tmp_path), ("Ana",))
+    path.unlink()
+    assert index.check(("Ana",)).status is HistoryStatus.UNAVAILABLE
+    assert not path.exists()
+
+
 @pytest.mark.parametrize("mode", ["missing_key", "both_key_fields_missing", "corrupt_ciphertext", "wrong_user", "wrong_but_valid_key"])
 def test_key_failure_is_unavailable_never_false_clean(tmp_path, mode):
     index = HistoryIndex(tmp_path / "history.sqlite", MemoryProtector())
@@ -93,6 +104,13 @@ def test_clear_only_removes_history_and_preserves_official_folder(tmp_path):
     assert (folder / "certificate.pdf").read_bytes() == b"official bytes"
 
 
+def test_clear_does_not_initialize_missing_index(tmp_path):
+    index = HistoryIndex(tmp_path / "history.sqlite", MemoryProtector())
+    with pytest.raises(HistoryError):
+        index.clear()
+    assert not index.path.exists()
+
+
 def test_concurrent_records_keep_both_entries_and_one_key(tmp_path):
     index = HistoryIndex(tmp_path / "history.sqlite", MemoryProtector())
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -107,12 +125,12 @@ def test_concurrent_records_keep_both_entries_and_one_key(tmp_path):
 
 def test_record_batch_rolls_back_all_rows_when_one_is_invalid(tmp_path):
     index = HistoryIndex(tmp_path / "history.sqlite", MemoryProtector())
-    assert index.check(("Ana",)).status is HistoryStatus.CLEAN
+    index.record(_batch(tmp_path, "prior"), ("Bea",))
 
 
 def test_record_batch_rejects_incomplete_selected_identity_even_with_certificate_id(tmp_path):
     index = HistoryIndex(tmp_path / "history.sqlite", MemoryProtector())
-    assert index.check(("Ana",)).status is HistoryStatus.CLEAN
+    index.record(_batch(tmp_path, "prior"), ("Bea",))
     with pytest.raises(HistoryError) as caught:
         index.record_batch(_batch(tmp_path), (HistoryEntry(("",), "CERT-1"),))
     assert caught.value.code == "history.missing_identity"

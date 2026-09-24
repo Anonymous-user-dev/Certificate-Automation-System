@@ -15,6 +15,7 @@ from certificate_automation.batch import BatchGenerator
 from certificate_automation.batch import BatchResult
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
 from certificate_automation.domain import BatchState, Issue, Severity
+from certificate_automation.history import HistoryIndex
 from certificate_automation.i18n import CatalogSet, package_root
 from certificate_automation.mapping import ColumnValue, FormattedDateValue, MappingPlan
 from certificate_automation.output_options import OutputOptions
@@ -220,6 +221,71 @@ def test_warning_acknowledgement_is_bound_to_dataset_revision(qtbot, tmp_path, d
     window.data_page.model.setData(window.data_page.model.index(0, 0), "Changed")
 
     assert window.project_state.warning_ack_revision is None
+
+
+def test_operator_configures_history_check_and_must_acknowledge_unavailable_history(
+    qtbot, tmp_path, docx_factory,
+):
+    class Protector:
+        def protect(self, value, *, purpose):
+            return value[::-1]
+        def unprotect(self, value, *, purpose):
+            return value[::-1]
+
+    template_path = docx_factory(paragraph_runs=[["{{FULL_NAME}}"], ["{{AWARD}}"]])
+    services = _services(tmp_path, template_path)
+    services.history_index = HistoryIndex(tmp_path / "missing-history.sqlite", Protector())
+    window = WorkspaceWindow(services)
+    qtbot.addWidget(window)
+    project_path = tmp_path / "Duplicate Review.certproject"
+    window.new_project(project_path)
+    window.data_page.set_dataset(_dataset())
+    qtbot.mouseClick(window.data_page.continue_button, Qt.MouseButton.LeftButton)
+    window.template_page.set_inspection(inspect_template(template_path))
+    qtbot.mouseClick(window.template_page.continue_button, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(window.template_health_page.continue_button, Qt.MouseButton.LeftButton)
+    window.match_page.cards["FULL_NAME"].set_column("Name")
+    window.match_page.cards["AWARD"].set_column("Award")
+    qtbot.mouseClick(window.match_page.continue_button, Qt.MouseButton.LeftButton)
+    _finish_layout_review(window, qtbot)
+
+    window.review_page.identity_columns.item(0).setCheckState(Qt.CheckState.Checked)
+    window.review_page.check_history.setChecked(True)
+    qtbot.mouseClick(window.review_page.continue_button, Qt.MouseButton.LeftButton)
+    assert window.current_step == "review"
+    assert "could not be checked" in window.review_page.issue_list.item(0).text()
+    assert window.project_state.warning_ack_digest is None
+    qtbot.mouseClick(window.review_page.acknowledge_button, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(window.review_page.continue_button, Qt.MouseButton.LeftButton)
+    assert window.current_step == "output"
+    assert window.project_state.duplicate_policy.check_history is True
+    assert window.project_state.warning_ack_digest
+    assert window.coordinator.flush()
+    saved = ProjectStore.open(project_path).load()
+    assert saved.duplicate_policy["identity_columns"] == ["name"]
+    assert saved.acknowledgements == (window.project_state.warning_ack_digest,)
+
+    destination = tmp_path / "official"
+    destination.mkdir()
+    window.output_page.destination.setText(str(destination))
+    qtbot.mouseClick(window.output_page.continue_button, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(window.results_page.generate_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: window.results_page.state == "published", timeout=10000)
+    qtbot.waitUntil(lambda: window._thread is None)
+    request = services.generator.requests[-1]
+    assert request.duplicate_policy.check_history is True
+    assert request.history_index is services.history_index
+    assert request.warning_ack_digest == window.project_state.warning_ack_digest
+    assert window.coordinator.flush()
+
+    reopened = WorkspaceWindow(services)
+    qtbot.addWidget(reopened)
+    reopened.load_project(project_path)
+    assert reopened.project_state.duplicate_policy.check_history is True
+    assert reopened.review_page.identity_columns.item(0).checkState() == Qt.CheckState.Checked
+    assert reopened.project_state.warning_ack_digest == window.project_state.warning_ack_digest
+    reopened.data_page.model.setData(reopened.data_page.model.index(0, 0), "Changed")
+    assert reopened.project_state.warning_ack_digest is None
 
 
 def test_result_actions_disabled_until_atomic_publication(qtbot, tmp_path, docx_factory):

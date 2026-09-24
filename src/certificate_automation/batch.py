@@ -25,6 +25,7 @@ from certificate_automation.audit import (
 )
 from certificate_automation.dataset import TabularDataset
 from certificate_automation.domain import BatchResult, BatchState, Severity
+from certificate_automation.history import DuplicatePolicy, HistoryIndex
 from certificate_automation.mapping import MappingPlan, MappingSelection, evaluate_plan
 from certificate_automation.output_options import OutputOptions
 from certificate_automation.pdf_merge import (
@@ -55,6 +56,9 @@ class BatchRequest:
     mappings: MappingSelection | MappingPlan
     outputs: Path | OutputOptions
     locale: str
+    duplicate_policy: DuplicatePolicy
+    history_index: HistoryIndex | None
+    warning_ack_digest: str | None
 
     def __init__(
         self,
@@ -63,12 +67,19 @@ class BatchRequest:
         mappings: MappingSelection | MappingPlan,
         outputs: Path | OutputOptions,
         locale: str = "en",
+        *,
+        duplicate_policy: DuplicatePolicy | None = None,
+        history_index: HistoryIndex | None = None,
+        warning_ack_digest: str | None = None,
     ) -> None:
         object.__setattr__(self, "dataset", dataset)
         object.__setattr__(self, "template", template)
         object.__setattr__(self, "mappings", mappings)
         object.__setattr__(self, "outputs", outputs)
         object.__setattr__(self, "locale", locale)
+        object.__setattr__(self, "duplicate_policy", duplicate_policy or DuplicatePolicy())
+        object.__setattr__(self, "history_index", history_index)
+        object.__setattr__(self, "warning_ack_digest", warning_ack_digest)
 
     @property
     def workbook(self) -> WorkbookData | TabularDataset:
@@ -344,12 +355,22 @@ class BatchGenerator:
         if cancellation.requested:
             return BatchResult(BatchState.CANCELLED)
 
-        report = validate_preflight(dataset, request.template, plan, outputs)
+        report = validate_preflight(
+            dataset, request.template, plan, outputs,
+            duplicate_policy=request.duplicate_policy,
+            history_index=request.history_index,
+        )
         if not report.ready:
             raise BatchGenerationError(
                 "The batch did not pass validation.",
                 code="validation_failed",
                 user_action="Correct every validation error before generating documents.",
+            )
+        if report.warning_digest and request.warning_ack_digest != report.warning_digest:
+            raise BatchGenerationError(
+                "The current validation warnings were not acknowledged.",
+                code="warnings_not_acknowledged",
+                user_action="Review and acknowledge the current warnings before generating.",
             )
 
         needs_pdf = outputs.individual_pdf or outputs.combined_pdf

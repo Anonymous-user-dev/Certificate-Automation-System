@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from hashlib import sha256
 import os
+import tempfile
 from pathlib import Path
 from typing import Mapping
 
@@ -36,6 +37,7 @@ from certificate_automation.dataset import Column, DataRow, SourceSnapshot, Tabu
 from certificate_automation.batch import BatchRequest, CancellationToken
 from certificate_automation.i18n import CatalogError, CatalogSet, SUPPORTED_LOCALES, package_root
 from certificate_automation.mapping import MappingPlan, evaluate_plan
+from certificate_automation.history import DuplicatePolicy
 from certificate_automation.profiles import MappingProfile, ProfileError, ProfileStore, compare_profile
 from certificate_automation.output_options import OutputOptions
 from certificate_automation.project import ProjectCoordinator, ProjectError, ProjectSaveError, ProjectState, ProjectStore
@@ -43,6 +45,7 @@ from certificate_automation.project_catalog import ProjectCatalog
 from certificate_automation.project_migration import ProjectMigrationService
 from certificate_automation.template import Placeholder, TemplateInspection, inspect_template
 from certificate_automation.template_health import TemplateHealthService
+from certificate_automation.validation import ValidationReport, validate_preflight
 from certificate_automation.ui.project_home_page import ProjectHomePage
 from certificate_automation.ui.data_page import DataPage, ImportPreviewDialog
 from certificate_automation.ui.match_page import MatchPage
@@ -82,6 +85,8 @@ class OperatorProjectState:
     plan: MappingPlan | None = None
     outputs: OutputOptions | None = None
     warning_ack_revision: int | None = None
+    duplicate_policy: DuplicatePolicy = DuplicatePolicy()
+    warning_ack_digest: str | None = None
 
 
 class SaveState(str, Enum):
@@ -265,6 +270,7 @@ class WorkspaceWindow(QMainWindow):
         self.review_page.review_accepted.connect(self._accept_review)
         self.review_page.issue_activated.connect(self._focus_issue)
         self.review_page.warnings_acknowledged.connect(self._acknowledge_warnings)
+        self.review_page.policy_changed.connect(self._policy_changed)
         self.review_page.preview_requested.connect(self._generate_preview)
         self.output_page.options_accepted.connect(self._accept_outputs)
         self.results_page.generate_requested.connect(self.start_generation)
@@ -458,13 +464,15 @@ class WorkspaceWindow(QMainWindow):
             except ValueError:
                 repair_code = "project.resume_mapping_repair"
                 target_step = "mapping"
-                restored = replace(restored, plan=None, outputs=None, warning_ack_revision=None)
+                restored = replace(restored, plan=None, outputs=None,
+                                   warning_ack_revision=None, warning_ack_digest=None)
                 self.project_state = restored
                 project = self._clear_invalid_project_state(project, "mapping", target_step)
                 self._loaded_project = project
                 self.match_page.set_context(project.dataset, restored.template.names)
         if restored.plan is not None:
             self.review_page.set_context(project.dataset, restored.plan)
+            self.review_page.set_policy(restored.duplicate_policy)
         self.output_page.set_order(project.dataset.order)
         if restored.outputs is not None:
             self.output_page.set_options(restored.outputs)
@@ -505,7 +513,15 @@ class WorkspaceWindow(QMainWindow):
     def _restore_project_state(
         self, project: ProjectState
     ) -> tuple[ProjectState, OperatorProjectState, str, str | None]:
-        restored = OperatorProjectState(dataset=project.dataset)
+        restored = OperatorProjectState(
+            dataset=project.dataset,
+            duplicate_policy=DuplicatePolicy.from_json(dict(project.duplicate_policy)),
+            warning_ack_digest=next(
+                (value for value in project.acknowledgements
+                 if len(value) == 64 and all(char in "0123456789abcdef" for char in value)),
+                None,
+            ),
+        )
         maximum = "template"
         repair_code = None
         if project.template_path is not None:
@@ -651,7 +667,8 @@ class WorkspaceWindow(QMainWindow):
         )
         review_controls = (
             self.review_page.preview_button, self.review_page.acknowledge_button,
-            self.review_page.continue_button,
+            self.review_page.continue_button, self.review_page.identity_columns,
+            self.review_page.certificate_id_combo, self.review_page.check_history,
         )
         output_controls = (
             self.output_page.docx, self.output_page.individual_pdf,
@@ -740,6 +757,11 @@ class WorkspaceWindow(QMainWindow):
             ),
             locale=self.catalogs.locale,
             active_step=self.current_step,
+            duplicate_policy=current.duplicate_policy.to_json(),
+            acknowledgements=(
+                (current.warning_ack_digest,) if current.warning_ack_digest
+                else self._loaded_project.acknowledgements
+            ),
         )
         self.coordinator.mark_dirty(self._loaded_project)
         self._set_save_state(SaveState.SAVING)
@@ -1059,6 +1081,7 @@ class WorkspaceWindow(QMainWindow):
             plan=None,
             outputs=None,
             warning_ack_revision=None,
+            warning_ack_digest=None,
         )
         self._layout_review_key = None
         self.template_health_page.clear_layout()
@@ -1110,6 +1133,7 @@ class WorkspaceWindow(QMainWindow):
             self.project_state = replace(
                 self.project_state, template=None, plan=None, outputs=None,
                 warning_ack_revision=None,
+                warning_ack_digest=None,
             )
             self._layout_review_key = None
             self.template_health_page.clear_layout()
@@ -1145,6 +1169,7 @@ class WorkspaceWindow(QMainWindow):
             plan=None,
             outputs=None,
             warning_ack_revision=None,
+            warning_ack_digest=None,
         )
         self._layout_review_key = None
         self.template_health_page.clear_layout()
@@ -1185,6 +1210,7 @@ class WorkspaceWindow(QMainWindow):
             plan=plan,
             outputs=None,
             warning_ack_revision=None,
+            warning_ack_digest=None,
         )
         self._layout_review_key = None
         self.template_health_page.clear_layout()
@@ -1192,6 +1218,7 @@ class WorkspaceWindow(QMainWindow):
         if self._loaded_project is not None:
             self._loaded_project = replace(self._loaded_project, layout_review=None)
         self.review_page.set_context(self.project_state.dataset, plan)
+        self.review_page.set_policy(self.project_state.duplicate_policy)
         self.state = replace(self.state, project_revision=self.state.project_revision + 1)
         self._mark_project_dirty()
         self.mark_step_complete("mapping")
@@ -1255,7 +1282,8 @@ class WorkspaceWindow(QMainWindow):
     def _invalidate_mapping_review(self, *, preserve_plan: bool = False) -> None:
         previous_plan = self.project_state.plan if preserve_plan else None
         self.project_state = replace(
-            self.project_state, plan=previous_plan, outputs=None, warning_ack_revision=None,
+            self.project_state, plan=previous_plan, outputs=None,
+            warning_ack_revision=None, warning_ack_digest=None,
         )
         self._layout_review_key = None
         self.template_health_page.clear_layout()
@@ -1377,6 +1405,17 @@ class WorkspaceWindow(QMainWindow):
     def _accept_review(self) -> None:
         if self._read_only:
             return
+        report = self._review_report()
+        if report is None:
+            return
+        self.review_page.set_issues(report.issues)
+        if not report.ready:
+            return
+        if report.warning_digest and self.project_state.warning_ack_digest != report.warning_digest:
+            code = "review.warning_ack_required"
+            self.banner.show_issue(code, self.catalogs.text(code))
+            return
+        self.banner.clear()
         self.output_page.set_order(self.project_state.dataset.order)
         self.output_page.continue_button.setEnabled(True)
         availability = getattr(self.services, "word_availability", None)
@@ -1404,9 +1443,44 @@ class WorkspaceWindow(QMainWindow):
         if self._read_only:
             return
         dataset = self.project_state.dataset
+        report = self._review_report()
+        if report is not None:
+            self.review_page.set_issues(report.issues)
+        digest = report.warning_digest if report is not None and report.ready else None
         self.project_state = replace(
             self.project_state,
             warning_ack_revision=dataset.revision if dataset else None,
+            warning_ack_digest=digest,
+        )
+        if self._loaded_project is not None:
+            self.state = replace(self.state, project_revision=self.state.project_revision + 1)
+            self._mark_project_dirty()
+        self.banner.clear()
+
+    def _policy_changed(self, policy: DuplicatePolicy) -> None:
+        if self._read_only or policy == self.project_state.duplicate_policy:
+            return
+        self.project_state = replace(
+            self.project_state, duplicate_policy=policy,
+            warning_ack_revision=None, warning_ack_digest=None,
+        )
+        self.review_page.set_issues(())
+        if self._loaded_project is not None:
+            self._loaded_project = replace(self._loaded_project, approval=None, acknowledgements=())
+        self.state = replace(self.state, project_revision=self.state.project_revision + 1)
+        self._mark_project_dirty()
+
+    def _review_report(self) -> ValidationReport | None:
+        current = self.project_state
+        if not all((current.dataset, current.template, current.plan)):
+            return None
+        outputs = current.outputs or OutputOptions(
+            True, False, False, Path(tempfile.gettempdir()), "Review", current.dataset.order,
+        )
+        return validate_preflight(
+            current.dataset, current.template, current.plan, outputs,
+            duplicate_policy=current.duplicate_policy,
+            history_index=getattr(self.services, "history_index", None),
         )
 
     def _generate_preview(self, row_id: str) -> None:
@@ -1464,12 +1538,17 @@ class WorkspaceWindow(QMainWindow):
             )
             self._show_step("template_health")
             return
-        report = self.services.validate(
-            current.dataset,
-            current.template,
-            current.plan,
-            current.outputs,
-        )
+        validator = getattr(self.services, "validate", validate_preflight)
+        if validator is validate_preflight:
+            report = validator(
+                current.dataset, current.template, current.plan, current.outputs,
+                duplicate_policy=current.duplicate_policy,
+                history_index=getattr(self.services, "history_index", None),
+            )
+        else:
+            report = validator(
+                current.dataset, current.template, current.plan, current.outputs,
+            )
         if report.dataset_revision != current.dataset.revision:
             self.banner.show_issue(
                 "validation.revision_changed",
@@ -1483,6 +1562,7 @@ class WorkspaceWindow(QMainWindow):
                 plan=None,
                 outputs=None,
                 warning_ack_revision=None,
+                warning_ack_digest=None,
             )
             self.banner.show_issue(
                 "validation.template_changed",
@@ -1494,12 +1574,21 @@ class WorkspaceWindow(QMainWindow):
             self.review_page.set_issues(report.issues)
             self._show_step("review")
             return
+        if report.warning_digest and current.warning_ack_digest != report.warning_digest:
+            code = "review.warning_ack_required"
+            self.review_page.set_issues(report.issues)
+            self.banner.show_issue(code, self.catalogs.text(code))
+            self._show_step("review")
+            return
         request = BatchRequest(
             current.dataset,
             current.template,
             current.plan,
             current.outputs,
             self.catalogs.locale,
+            duplicate_policy=current.duplicate_policy,
+            history_index=getattr(self.services, "history_index", None),
+            warning_ack_digest=current.warning_ack_digest,
         )
         self.cancellation = CancellationToken()
         self.results_page.set_running()

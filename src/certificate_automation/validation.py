@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
+import json
 from pathlib import Path
 import shutil
 import tempfile
@@ -42,6 +43,7 @@ class ValidationReport:
     estimated_bytes: int
     dataset_revision: int = -1
     template_sha256: str = ""
+    warning_digest: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -300,6 +302,7 @@ def _validate_dataset(
     seen_identities: dict[tuple[str, ...], str] = {}
     certificate_groups: dict[str, list[str]] = {}
     history_unavailable_reported = False
+    history_facts: list[object] = []
 
     for placeholder, source in plan.sources.items():
         referenced = _referenced_columns(source)
@@ -352,11 +355,18 @@ def _validate_dataset(
                 ))
         if duplicate_policy.check_history:
             if history_index is None:
+                history_facts.append((row_id, "unavailable"))
                 if not history_unavailable_reported:
                     issues.append(_warning("history.unavailable", "history"))
                     history_unavailable_reported = True
             elif (selected_identity and all(selected_identity)) or certificate_id:
                 check = history_index.check(selected_identity, certificate_id=certificate_id)
+                history_facts.append((
+                    row_id, check.status.value,
+                    tuple((match.kind, match.batch_id, match.revision,
+                           match.completed_at.isoformat(), str(match.folder))
+                          for match in check.matches),
+                ))
                 if check.status is HistoryStatus.UNAVAILABLE:
                     if not history_unavailable_reported:
                         issues.append(_warning("history.unavailable", "history"))
@@ -499,12 +509,30 @@ def _validate_dataset(
         if path is not None
     )
     issues.extend(_validate_destination(options.destination, source_paths, estimated_bytes))
+    warnings = tuple(issue for issue in issues if issue.severity is Severity.WARNING)
+    warning_digest = ""
+    if warnings:
+        context = {
+            "dataset": dataset.canonical_sha256(),
+            "template": template_hash,
+            "mapping": plan.to_json(),
+            "policy": duplicate_policy.to_json(),
+            "history": history_facts,
+            "warnings": [
+                (issue.code, issue.row_id, issue.column_id, dict(issue.parameters))
+                for issue in warnings
+            ],
+        }
+        warning_digest = sha256(json.dumps(
+            context, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
     return ValidationReport(
         tuple(issues),
         filename_stems,
         estimated_bytes,
         dataset.revision,
         template_hash,
+        warning_digest,
     )
 
 

@@ -14,11 +14,13 @@ from certificate_automation.batch import (
     CancellationToken,
 )
 from certificate_automation.domain import BatchState
+from certificate_automation.history import DuplicatePolicy, HistoryIndex, HistoryStatus, PublishedBatch
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
 from certificate_automation.mapping import ColumnValue, MappingPlan, suggest_mappings
 from certificate_automation.output_options import OutputOptions
 from certificate_automation.pdf_merge import CombinedPdfRecord
 from certificate_automation.template import inspect_template
+from certificate_automation.validation import validate_preflight
 from certificate_automation.word import Availability
 from certificate_automation.workbook import load_workbook_data
 from fixtures import docx_factory, xlsx_factory
@@ -222,6 +224,8 @@ def _typed_request(tmp_path, docx_factory, **selected):
         revision=4,
         order=("row-2", "row-1"),
     )
+
+
     destination = tmp_path / "typed-batches"
     destination.mkdir()
     outputs = OutputOptions(
@@ -239,6 +243,42 @@ def _typed_request(tmp_path, docx_factory, **selected):
         outputs,
         "zh_CN",
     )
+
+
+def test_typed_generation_rechecks_history_and_requires_current_warning_ack(tmp_path, docx_factory):
+    class Protector:
+        def protect(self, value, *, purpose):
+            return value[::-1]
+        def unprotect(self, value, *, purpose):
+            return value[::-1]
+
+    basic = _typed_request(tmp_path, docx_factory)
+    history = HistoryIndex(tmp_path / "history.sqlite", Protector())
+    policy = DuplicatePolicy(None, ("full_name",), True)
+    request = BatchRequest(
+        basic.dataset, basic.template, basic.mappings, basic.outputs,
+        duplicate_policy=policy, history_index=history,
+    )
+    with pytest.raises(BatchGenerationError) as caught:
+        _generator(FakeConverter()).generate(request)
+    assert caught.value.code == "warnings_not_acknowledged"
+    assert history.check(("Ana García",)).status is HistoryStatus.UNAVAILABLE
+    assert not list(request.destination.glob("Certificate Batch *"))
+
+    report = validate_preflight(
+        basic.dataset, basic.template, basic.mappings, basic.outputs,
+        duplicate_policy=policy, history_index=history,
+    )
+    acknowledged = BatchRequest(
+        basic.dataset, basic.template, basic.mappings, basic.outputs,
+        duplicate_policy=policy, history_index=history,
+        warning_ack_digest=report.warning_digest,
+    )
+    history.record(PublishedBatch("previous", 1, datetime.now(timezone.utc), tmp_path / "old"),
+                   ("Ana García",))
+    with pytest.raises(BatchGenerationError) as stale:
+        _generator(FakeConverter()).generate(acknowledged)
+    assert stale.value.code == "warnings_not_acknowledged"
 
 
 def test_combined_only_publishes_one_ordered_pdf_and_no_temporary_formats(tmp_path, docx_factory):
