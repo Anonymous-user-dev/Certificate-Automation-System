@@ -248,6 +248,7 @@
   "project.unreadable": "项目文件已损坏或无法读取。",
   "recovery.incomplete_batch": "发现未完成的批次。它未作为正式输出发布。",
   "recovery.project_backup": "发现可恢复的草稿备份。",
+  "recovery.scan_unavailable": "无法检查恢复状态，因为部分输出文件夹无法读取。相关操作已禁用；请检查文件夹访问权限后重试。",
   "review.no_issues": "未发现问题。",
   "review.ready": "可以生成。{warnings} 个警告，没有阻止性错误。",
   "review.blocked": "{errors} 个错误阻止了生成。",

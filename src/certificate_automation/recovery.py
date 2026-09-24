@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
+import stat
 import shutil
 
 from certificate_automation.batch_journal import read_publish_intents
@@ -46,9 +48,18 @@ class RecoveryService:
     def find_incomplete(self, destination: Path) -> tuple[IncompleteBatch, ...]:
         destination = Path(destination)
         try:
-            if not destination.is_dir():
-                return ()
-            children = tuple(sorted(destination.iterdir(), key=lambda item: item.name.casefold()))
+            root_stat = destination.stat()
+        except FileNotFoundError:
+            return ()
+        except OSError as error:
+            raise RecoveryScanError(unavailable_paths=(destination,), root_unavailable=True) from error
+        if not stat.S_ISDIR(root_stat.st_mode):
+            return ()
+        try:
+            with os.scandir(destination) as scan:
+                children = tuple(sorted((destination / entry.name for entry in scan), key=lambda item: item.name.casefold()))
+        except FileNotFoundError:
+            return ()
         except OSError as error:
             raise RecoveryScanError(unavailable_paths=(destination,), root_unavailable=True) from error
         records: list[IncompleteBatch] = []
@@ -63,11 +74,14 @@ class RecoveryService:
         consumed_intents: set[Path] = set()
         for path in children:
             try:
-                is_directory = path.is_dir()
-                is_symlink = path.is_symlink()
+                entry_stat = path.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
             except OSError:
                 unavailable.append(path)
                 continue
+            is_symlink = stat.S_ISLNK(entry_stat.st_mode)
+            is_directory = stat.S_ISDIR(entry_stat.st_mode)
             if is_directory and not is_symlink and path.name.startswith(INCOMPLETE_PREFIX):
                 records.append(
                     IncompleteBatch(
@@ -82,7 +96,8 @@ class RecoveryService:
             journal = path / "batch_journal.json"
             marker = path / ".certificate-publication-failed.json"
             try:
-                if not journal.is_file() or journal.is_symlink():
+                journal_stat = journal.stat(follow_symlinks=False)
+                if not stat.S_ISREG(journal_stat.st_mode):
                     continue
                 payload = json.loads(journal.read_text("utf-8"))
                 if (
@@ -91,6 +106,8 @@ class RecoveryService:
                 ):
                     continue
                 batch_id = payload["batch_id"]
+            except FileNotFoundError:
+                continue
             except OSError:
                 unavailable.append(path)
                 continue
@@ -112,7 +129,11 @@ class RecoveryService:
             if payload.get("state") == "published":
                 from certificate_automation.integrity import IntegrityService
                 try:
-                    marker_exists = marker.is_file() and not marker.is_symlink()
+                    try:
+                        marker_stat = marker.stat(follow_symlinks=False)
+                        marker_exists = stat.S_ISREG(marker_stat.st_mode)
+                    except FileNotFoundError:
+                        marker_exists = False
                     interrupted = (
                         intent is not None
                         or marker_exists
@@ -125,7 +146,11 @@ class RecoveryService:
                 if intent is not None:
                     consumed_intents.add(intent.path)
                 try:
-                    has_marker = marker.is_file() and not marker.is_symlink()
+                    try:
+                        marker_stat = marker.stat(follow_symlinks=False)
+                        has_marker = stat.S_ISREG(marker_stat.st_mode)
+                    except FileNotFoundError:
+                        has_marker = False
                 except OSError:
                     unavailable.append(path)
                     continue

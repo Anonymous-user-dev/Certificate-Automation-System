@@ -97,22 +97,68 @@ def test_recovery_journal_open_denial_keeps_partial_safe_records(tmp_path, monke
     assert incomplete.is_dir() and revision.is_dir()
 
 
-def test_recovery_disappearing_entry_reports_uncertainty_without_mutation(tmp_path, monkeypatch):
-    from certificate_automation.recovery import RecoveryScanError
+def test_recovery_definite_disappearing_entry_is_skipped(tmp_path, monkeypatch):
     disappearing = tmp_path / ".certificate-incomplete-vanished"
     disappearing.mkdir()
-    original_is_dir = Path.is_dir
+    original_stat = Path.stat
 
-    def vanished(self):
+    def vanished(self, *args, **kwargs):
         if self == disappearing:
-            raise FileNotFoundError("moved during scan")
-        return original_is_dir(self)
+            raise FileNotFoundError(2, "moved during scan", str(self))
+        return original_stat(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "is_dir", vanished)
+    monkeypatch.setattr(Path, "stat", vanished)
+    assert RecoveryService().find_incomplete(tmp_path) == ()
+
+
+def test_recovery_root_permission_stat_error_is_unavailable(tmp_path, monkeypatch):
+    from certificate_automation.recovery import RecoveryScanError
+    import errno
+
+    original_stat = Path.stat
+
+    def denied(self, *args, **kwargs):
+        if self == tmp_path:
+            raise PermissionError(errno.EACCES, "access denied", str(self))
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied)
     with pytest.raises(RecoveryScanError) as caught:
         RecoveryService().find_incomplete(tmp_path)
-    assert disappearing in caught.value.unavailable_paths
-    assert disappearing.exists()
+    assert caught.value.root_unavailable
+
+
+def test_recovery_entry_permission_stat_error_is_unavailable(tmp_path, monkeypatch):
+    from certificate_automation.recovery import RecoveryScanError
+    import errno
+
+    incomplete = tmp_path / ".certificate-incomplete-locked"
+    incomplete.mkdir()
+    original_stat = Path.stat
+
+    def denied(self, *args, **kwargs):
+        if self == incomplete:
+            raise PermissionError(errno.EPERM, "operation not permitted", str(self))
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied)
+    with pytest.raises(RecoveryScanError) as caught:
+        RecoveryService().find_incomplete(tmp_path)
+    assert incomplete in caught.value.unavailable_paths
+
+
+def test_recovery_missing_root_or_entry_is_skipped(tmp_path, monkeypatch):
+    missing = tmp_path / ".certificate-incomplete-gone"
+    original_stat = Path.stat
+
+    def vanished(self, *args, **kwargs):
+        if self == missing:
+            raise FileNotFoundError(2, "not found", str(self))
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", vanished)
+    assert RecoveryService().find_incomplete(tmp_path) == ()
+    assert RecoveryService().find_incomplete(tmp_path / "absent-root") == ()
 
 
 def test_unreadable_publish_intent_cannot_be_silently_ignored(tmp_path, monkeypatch):

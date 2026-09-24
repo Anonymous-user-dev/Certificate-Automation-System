@@ -8,6 +8,7 @@ from PySide6.QtCore import QThread, QTimer
 from PySide6.QtWidgets import QLabel, QMainWindow, QStackedWidget, QVBoxLayout, QWidget
 
 from certificate_automation.batch import BatchRequest, CancellationToken
+from certificate_automation.recovery import RecoveryScanError
 from certificate_automation.ui.files_page import FilesPage
 from certificate_automation.ui.generation_page import GenerationPage
 from certificate_automation.ui.mapping_page import MappingPage
@@ -53,9 +54,13 @@ class MainWindow(QMainWindow):
         self._failure_callback = None
         self.cancellation: CancellationToken | None = None
         self._close_when_idle = False
+        self._recovery_records = ()
+        self._recovery_scan_unavailable = False
 
         self.files_page.workbook_selected.connect(self._request_worksheets)
         self.files_page.destination_selected.connect(self._check_recovery)
+        if self.services.catalogs is not None:
+            self.services.catalogs.subscribe(lambda _locale: self._refresh_recovery_state())
         self.files_page.view_recovery_requested.connect(self._view_recovery)
         self.files_page.remove_recovery_requested.connect(self._remove_recovery)
         self.files_page.continue_requested.connect(self._load_inputs)
@@ -209,8 +214,25 @@ class MainWindow(QMainWindow):
             )
 
     def _check_recovery(self, value: str) -> None:
-        records = self.services.recovery.find_incomplete(Path(value)) if value else ()
-        self.files_page.set_incomplete_batches(records)
+        self._recovery_scan_unavailable = False
+        try:
+            records = self.services.recovery.find_incomplete(Path(value)) if value else ()
+        except RecoveryScanError as error:
+            records = error.records
+            self._recovery_scan_unavailable = True
+        self._recovery_records = tuple(records)
+        self._refresh_recovery_state()
+
+    def _refresh_recovery_state(self) -> None:
+        if self._recovery_scan_unavailable:
+            catalogs = self.services.catalogs
+            message = (catalogs.text("recovery.scan_unavailable") if catalogs is not None
+                       else "Recovery scan is unavailable. Check folder access and try again.")
+            self.files_page.set_incomplete_batches(
+                self._recovery_records, unavailable_message=message,
+            )
+        else:
+            self.files_page.set_incomplete_batches(self._recovery_records)
 
     def _view_recovery(self) -> None:
         records = getattr(self.files_page, "incomplete_batches", ())

@@ -248,6 +248,7 @@
   "project.unreadable": "The project file is damaged or cannot be read.",
   "recovery.incomplete_batch": "An incomplete batch was found. It was not published as official output.",
   "recovery.project_backup": "A recoverable draft backup was found.",
+  "recovery.scan_unavailable": "Recovery status is unavailable because some output folders could not be read. Actions are disabled; check folder access and try again.",
   "review.no_issues": "No issues found.",
   "review.ready": "Ready to generate. {warnings} warning(s), no blocking errors.",
   "review.blocked": "Generation is blocked by {errors} error(s).",

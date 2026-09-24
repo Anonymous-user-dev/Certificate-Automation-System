@@ -107,14 +107,14 @@ def test_locked_destination_keeps_other_history_visible_and_disables_local_actio
     elsewhere = tmp_path / "elsewhere" / "Awards-revision-1"
     elsewhere.mkdir(parents=True)
     (elsewhere / "manifest.json").write_text("{}", encoding="utf-8")
-    original_iterdir = Path.iterdir
+    original_stat = Path.stat
 
-    def inaccessible(self):
+    def inaccessible(self, *args, **kwargs):
         if self == locked:
-            raise PermissionError("access denied")
-        return original_iterdir(self)
+            raise PermissionError(13, "access denied", str(self))
+        return original_stat(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "iterdir", inaccessible)
+    monkeypatch.setattr(Path, "stat", inaccessible)
     catalogs = CatalogSet.load(package_root(), "en")
     page = HistoryPage(catalogs)
     qtbot.addWidget(page)
@@ -140,14 +140,14 @@ def test_locked_destination_keeps_other_history_visible_and_disables_local_actio
 def test_record_stat_failure_is_unavailable_with_actions_disabled(qtbot, tmp_path, monkeypatch):
     folder = tmp_path / "Awards-revision-1"
     folder.mkdir()
-    original_is_dir = Path.is_dir
+    original_stat = Path.stat
 
-    def denied(self):
+    def denied(self, *args, **kwargs):
         if self == folder:
-            raise PermissionError("locked")
-        return original_is_dir(self)
+            raise PermissionError(13, "locked", str(self))
+        return original_stat(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "is_dir", denied)
+    monkeypatch.setattr(Path, "stat", denied)
     catalogs = CatalogSet.load(package_root(), "en")
     page = HistoryPage(catalogs)
     qtbot.addWidget(page)
@@ -157,3 +157,47 @@ def test_record_stat_failure_is_unavailable_with_actions_disabled(qtbot, tmp_pat
     assert page.records[0].status == "unavailable"
     assert not any(page.action_button(0, action).isEnabled() for action in
                    ("open_folder", "open_combined", "open_audit", "verify", "correct", "remove"))
+
+
+def test_history_root_stat_denial_keeps_other_records_visible(qtbot, tmp_path, monkeypatch):
+    root = tmp_path / "locked-root"
+    root.mkdir()
+    elsewhere = tmp_path / "elsewhere" / "Awards-revision-1"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "manifest.json").write_text("{}", encoding="utf-8")
+    original_stat = Path.stat
+
+    def denied(self, *args, **kwargs):
+        if self == root:
+            raise PermissionError(13, "access denied", str(self))
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied)
+    catalogs = CatalogSet.load(package_root(), "en")
+    page = HistoryPage(catalogs)
+    qtbot.addWidget(page)
+    page.load(root, published_paths=(elsewhere,))
+
+    assert page._scan_unavailable
+    assert any(record.path == elsewhere for record in page.records)
+    assert page.status_label.text() == catalogs.text("history.scan_unavailable")
+
+
+def test_history_entry_stat_denial_is_not_misreported_as_missing(qtbot, tmp_path, monkeypatch):
+    folder = tmp_path / "Awards-revision-1"
+    folder.mkdir()
+    original_stat = Path.stat
+
+    def denied(self, *args, **kwargs):
+        if self == folder:
+            raise PermissionError(1, "operation not permitted", str(self))
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied)
+    page = HistoryPage(CatalogSet.load(package_root(), "en"))
+    qtbot.addWidget(page)
+    page.load(tmp_path)
+
+    assert len(page.records) == 1
+    assert page.records[0].status == "unavailable"
+    assert not page.action_button(0, "open_folder").isEnabled()

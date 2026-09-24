@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -14,6 +15,8 @@ from certificate_automation.domain import (
 )
 from certificate_automation.mapping import MappingSelection, suggest_mappings
 from certificate_automation.recovery import RecoveryService
+from certificate_automation.recovery import IncompleteBatch, RecoveryScanError
+from certificate_automation.i18n import CatalogSet, package_root
 from certificate_automation.template import Placeholder, TemplateInspection
 from certificate_automation.ui.main_window import LegacyMainWindow as MainWindow
 from certificate_automation.validation import ValidationReport
@@ -98,6 +101,33 @@ def test_user_can_select_map_and_validate_in_guided_order(qtbot, tmp_path):
     assert window.validation_page.generate_allowed is True
     assert window.validation_page.preview_button.isEnabled()
     assert window.validation_page.generate_button.isEnabled()
+
+
+def test_recovery_scan_error_is_localized_and_keeps_partial_records(qtbot, tmp_path):
+    services, _, _ = _services(tmp_path)
+    services = replace(services, catalogs=CatalogSet.load(package_root(), "en"))
+    incomplete = tmp_path / ".certificate-incomplete-safe"
+    incomplete.mkdir()
+    diagnostic = incomplete / "diagnostic.json"
+    diagnostic.write_text("{}", encoding="utf-8")
+    record = IncompleteBatch("safe", incomplete, diagnostic)
+
+    def uncertain(_destination):
+        raise RecoveryScanError((record,), (tmp_path / "locked",))
+
+    services.recovery.find_incomplete = uncertain
+    window = MainWindow(services)
+    qtbot.addWidget(window)
+
+    window.files_page.destination_selected.emit(str(tmp_path))
+
+    assert window.files_page.incomplete_batches == (record,)
+    assert services.catalogs.text("recovery.scan_unavailable") in window.files_page.recovery_label.text()
+    assert not window.files_page.remove_recovery_button.isEnabled()
+    services.catalogs.set_locale("ru")
+    assert window.files_page.recovery_label.text().startswith(
+        services.catalogs.text("recovery.scan_unavailable")
+    )
 
 
 def test_errors_are_visible_and_disable_preview_and_generation(qtbot, tmp_path):

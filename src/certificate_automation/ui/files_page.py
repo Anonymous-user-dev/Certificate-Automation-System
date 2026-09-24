@@ -139,8 +139,19 @@ class FilesPage(QWidget):
     def show_error(self, message: str) -> None:
         self.error_label.setText(f"Error: {message}" if message else "")
 
-    def set_incomplete_batches(self, records) -> None:
+    def set_incomplete_batches(self, records, *, unavailable_message: str | None = None) -> None:
         self.incomplete_batches = tuple(records)
+        if unavailable_message is not None:
+            first_line = unavailable_message
+            if self.incomplete_batches:
+                first = self.incomplete_batches[0]
+                first_line += f"\nRecovery notice: found {len(self.incomplete_batches)} incomplete batch record(s). Current batch ID: {first.batch_id}."
+            self.recovery_label.setText(first_line)
+            self.view_recovery_button.setEnabled(False)
+            self.remove_recovery_button.setEnabled(False)
+            self.recovery_panel.show()
+            return
+        self.remove_recovery_button.setEnabled(bool(self.incomplete_batches))
         if not self.incomplete_batches:
             self.recovery_label.clear()
             self.recovery_panel.hide()

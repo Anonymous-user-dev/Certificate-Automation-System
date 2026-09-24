@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
+import os
 from pathlib import Path
 import re
+import stat
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -92,23 +95,40 @@ class HistoryPage(QWidget):
         for path in self._published_paths:
             candidates.setdefault(path, (path.name, None))
         try:
-            children = tuple(self._destination.iterdir()) if self._destination.is_dir() else ()
-        except OSError:
+            root_stat = self._destination.stat()
+            if not stat.S_ISDIR(root_stat.st_mode):
+                children = ()
+            else:
+                with os.scandir(self._destination) as scan:
+                    children = tuple(self._destination / entry.name for entry in scan)
+        except OSError as error:
             children = ()
-            root_unavailable = True
+            if error.errno not in (errno.ENOENT, errno.ENOTDIR):
+                root_unavailable = True
         for path in children:
             match = re.search(r"-revision-(\d+)$", path.name, re.IGNORECASE)
             if match is None:
                 continue
             try:
-                visible = (
-                    path.is_dir() and not path.is_symlink()
-                    and (path / "manifest.json").is_file()
-                    and (path / "batch_journal.json").is_file()
-                )
-            except OSError:
-                unavailable_paths.add(path)
-                candidates.setdefault(path, (path.name, int(match.group(1))))
+                folder_stat = path.stat(follow_symlinks=False)
+                if stat.S_ISLNK(folder_stat.st_mode) or not stat.S_ISDIR(folder_stat.st_mode):
+                    continue
+                visible = True
+                for name in ("manifest.json", "batch_journal.json"):
+                    try:
+                        child_stat = (path / name).stat(follow_symlinks=False)
+                    except OSError as error:
+                        if error.errno in (errno.ENOENT, errno.ENOTDIR):
+                            visible = False
+                            break
+                        raise
+                    if not stat.S_ISREG(child_stat.st_mode):
+                        visible = False
+                        break
+            except OSError as error:
+                if error.errno not in (errno.ENOENT, errno.ENOTDIR):
+                    unavailable_paths.add(path)
+                    candidates.setdefault(path, (path.name, int(match.group(1))))
                 continue
             if visible:
                 candidates.setdefault(path, (path.name, int(match.group(1))))
@@ -127,14 +147,18 @@ class HistoryPage(QWidget):
                 status = "unavailable"
             else:
                 try:
-                    if not path.is_dir() or path.is_symlink():
+                    folder_stat = path.stat(follow_symlinks=False)
+                    if not stat.S_ISDIR(folder_stat.st_mode) or stat.S_ISLNK(folder_stat.st_mode):
                         status = "missing"
                     else:
                         status = "completed" if self.integrity.verify_revision(path).valid else "damaged"
-                except OSError:
-                    status = "unavailable"
-                    self._scan_unavailable = True
-                    self.status_label.setText(self.catalogs.text("history.scan_unavailable"))
+                except OSError as error:
+                    if error.errno in (errno.ENOENT, errno.ENOTDIR):
+                        status = "missing"
+                    else:
+                        status = "unavailable"
+                        self._scan_unavailable = True
+                        self.status_label.setText(self.catalogs.text("history.scan_unavailable"))
             records.append(HistoryRecord(path, batch_id, revision, status))
         for incomplete in incomplete_records:
             records = [record for record in records if record.path != incomplete.path]
@@ -230,7 +254,9 @@ class HistoryPage(QWidget):
                 control.setText(self.catalogs.text(key))
                 control.setAccessibleName(f"{control.text()}: {record.path.name}")
             try:
-                available = record.status != "unavailable" and record.path.is_dir() and not record.path.is_symlink()
+                record_stat = record.path.stat(follow_symlinks=False)
+                available = (record.status != "unavailable" and stat.S_ISDIR(record_stat.st_mode)
+                             and not stat.S_ISLNK(record_stat.st_mode))
             except OSError:
                 available = False
             buttons["open_folder"].setEnabled(available)
