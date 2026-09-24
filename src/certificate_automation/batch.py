@@ -27,7 +27,7 @@ from certificate_automation.audit import (
     write_support_log,
     write_summary,
 )
-from certificate_automation.batch_journal import BatchJournal, JournalState
+from certificate_automation.batch_journal import BatchJournal, JournalState, read_publish_intents
 from certificate_automation.dataset import TabularDataset
 from certificate_automation.domain import BatchResult, BatchState, Issue, Severity
 from certificate_automation.history import DuplicatePolicy, HistoryEntry, HistoryIndex, PublishedBatch
@@ -506,6 +506,10 @@ class BatchGenerator:
             match = matcher.fullmatch(candidate.name)
             if match:
                 existing.append(int(match.group(1)))
+        for intent in read_publish_intents(destination):
+            match = matcher.fullmatch(intent.final_name)
+            if match and int(match.group(1)) == intent.revision:
+                existing.append(intent.revision)
         revision_number = max(existing, default=0) + 1
         if request.revision_number is not None and request.revision_number != revision_number:
             raise BatchGenerationError("The proposed revision is stale.", code="output.revision_changed")
@@ -780,7 +784,7 @@ class BatchGenerator:
             )
             if intent_path is not None:
                 try:
-                    BatchJournal.clear_publish_intent(intent_path)
+                    BatchJournal.clear_publish_intent(intent_path, batch_id)
                 except Exception:
                     result_issues.append(Issue(Severity.WARNING, "journal", "journal.durability_uncertain"))
             return BatchResult(
@@ -813,7 +817,7 @@ class BatchGenerator:
                             published_issues.append(Issue(Severity.WARNING, "history", "history.record_failed"))
                         if intent_path is not None:
                             try:
-                                BatchJournal.clear_publish_intent(intent_path)
+                                BatchJournal.clear_publish_intent(intent_path, batch_id)
                             except Exception:
                                 pass
                         return BatchResult(
@@ -840,7 +844,7 @@ class BatchGenerator:
                     ) from rollback_error
             if intent_path is not None:
                 try:
-                    BatchJournal.clear_publish_intent(intent_path)
+                    BatchJournal.clear_publish_intent(intent_path, batch_id)
                 except Exception:
                     pass
             diagnostic_path = self._retain_incomplete(staging, batch_id, error)

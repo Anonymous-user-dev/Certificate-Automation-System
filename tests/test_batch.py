@@ -705,3 +705,73 @@ def test_template_change_during_generation_blocks_publication(tmp_path, docx_fac
 
     assert caught.value.code == "template.changed_during_generation"
     assert not list(request.destination.glob("Certificate Batch *"))
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_stale_intent_for_same_target_cannot_hide_current_publication(
+    tmp_path, docx_factory, monkeypatch, reverse,
+):
+    from certificate_automation.batch_journal import BatchJournal, JournalError
+    from certificate_automation.recovery import RecoveryService
+
+    request = _typed_request(tmp_path, docx_factory)
+    def retain_intent(_path):
+        raise JournalError("journal.publication_intent_clear_failed")
+    monkeypatch.setattr(BatchJournal, "clear_publish_intent", retain_intent)
+    result = _generator(FakeConverter()).generate(request)
+    stale = BatchJournal.create_publish_intent(
+        request.destination, "stale-batch", result.output_dir.name,
+        "b" * 64, result.revision_number,
+    )
+
+    original_glob = Path.glob
+    def ordered_glob(path, pattern):
+        matches = list(original_glob(path, pattern))
+        if pattern.startswith(".certificate-publish-intent-"):
+            matches.sort(key=lambda item: item.name, reverse=reverse)
+        return iter(matches)
+    monkeypatch.setattr(Path, "glob", ordered_glob)
+
+    records = RecoveryService().find_incomplete(request.destination)
+    assert any(
+        record.path == result.output_dir
+        and record.batch_id == "20260920-120000-abcd1234"
+        for record in records
+    )
+    assert any(record.diagnostic_path == stale for record in records)
+
+
+def test_pending_intent_reserves_revision_number(tmp_path, docx_factory):
+    from certificate_automation.batch_journal import BatchJournal
+
+    request = _typed_request(tmp_path, docx_factory)
+    BatchJournal.create_publish_intent(
+        request.destination, "pending-batch", "Awards-revision-1", "a" * 64, 1,
+    )
+    result = _generator(FakeConverter()).generate(request)
+
+    assert result.revision_number == 2
+
+
+def test_clear_publish_intent_requires_matching_batch_ownership(tmp_path):
+    from certificate_automation.batch_journal import BatchJournal, JournalError
+
+    own = BatchJournal.create_publish_intent(
+        tmp_path, "batch-owned", "Awards-revision-1", "a" * 64, 1,
+    )
+    unrelated = BatchJournal.create_publish_intent(
+        tmp_path, "batch-other", "Other-revision-2", "b" * 64, 2,
+    )
+    with pytest.raises(JournalError, match="journal.invalid_publication_intent"):
+        BatchJournal.clear_publish_intent(own, "batch-other")
+
+    assert own.is_file()
+    original_payload = json.loads(own.read_text("utf-8"))
+    tampered_payload = dict(original_payload, batch_id="batch-other")
+    own.write_text(json.dumps(tampered_payload), encoding="utf-8")
+    with pytest.raises(JournalError, match="journal.invalid_publication_intent"):
+        BatchJournal.clear_publish_intent(own, "batch-owned")
+    own.write_text(json.dumps(original_payload), encoding="utf-8")
+    BatchJournal.clear_publish_intent(own, "batch-owned")
+    assert not own.exists()
+    assert unrelated.is_file()

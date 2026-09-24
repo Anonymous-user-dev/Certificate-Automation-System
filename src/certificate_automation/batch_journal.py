@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from hashlib import sha256
@@ -28,6 +29,55 @@ class JournalState(str, Enum):
 
 _ORDER = tuple(JournalState)
 INTENT_PREFIX = ".certificate-publish-intent-"
+
+
+@dataclass(frozen=True, slots=True)
+class PublishIntent:
+    batch_id: str
+    path: Path
+    final_name: str
+    approval_digest: str
+    revision: int
+
+
+def read_publish_intents(destination: Path) -> tuple[PublishIntent, ...]:
+    """Read only structurally valid app-owned intents; never trust their target paths."""
+
+    destination = Path(destination)
+    records: list[PublishIntent] = []
+    for path in destination.glob(f"{INTENT_PREFIX}*.json"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text("utf-8"))
+            batch_id = payload["batch_id"]
+            final_name = payload["final_name"]
+            digest = payload["approval_digest"]
+            revision = payload["revision"]
+            if (
+                payload.get("schema_version") != 1
+                or payload.get("status") != "pending"
+                or not isinstance(batch_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]+", batch_id)
+                or path.name != f"{INTENT_PREFIX}{batch_id}.json"
+                or not isinstance(final_name, str)
+                or final_name in {"", ".", ".."}
+                or Path(final_name).name != final_name
+                or "/" in final_name
+                or chr(92) in final_name
+                or any(ord(character) < 32 for character in final_name)
+                or not isinstance(revision, int)
+                or isinstance(revision, bool)
+                or revision < 1
+                or not final_name.endswith(f"-revision-{revision}")
+                or not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            ):
+                continue
+            records.append(PublishIntent(batch_id, path, final_name, digest, revision))
+        except (OSError, KeyError, ValueError, TypeError):
+            continue
+    return tuple(records)
 
 
 def approval_facts_digest(approval_digest: str, intended_counts: dict[str, int], row_ids: tuple[str, ...] | list[str]) -> str:
@@ -156,10 +206,20 @@ class BatchJournal:
 
         destination = Path(destination)
         if (
-            not re.fullmatch(r"[A-Za-z0-9_-]+", batch_id)
+            not isinstance(batch_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", batch_id)
+            or not isinstance(final_name, str)
+            or final_name in {"", ".", ".."}
             or Path(final_name).name != final_name
-            or "/" in final_name or "\\" in final_name
+            or "/" in final_name
+            or chr(92) in final_name
+            or any(ord(character) < 32 for character in final_name)
+            or not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 1
             or not final_name.endswith(f"-revision-{revision}")
+            or not isinstance(approval_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", approval_digest)
         ):
             raise JournalError("journal.invalid_publication_intent")
         path = destination / f"{INTENT_PREFIX}{batch_id}.json"
@@ -180,12 +240,25 @@ class BatchJournal:
         return path
 
     @staticmethod
-    def clear_publish_intent(path: Path) -> None:
+    def clear_publish_intent(path: Path, batch_id: str) -> None:
         path = Path(path)
-        if not path.name.startswith(INTENT_PREFIX) or path.suffix != ".json" or path.is_symlink():
+        if (
+            not isinstance(batch_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", batch_id)
+            or path.name != f"{INTENT_PREFIX}{batch_id}.json"
+            or path.is_symlink()
+        ):
+            raise JournalError("journal.invalid_publication_intent")
+        if not path.exists():
+            return
+        owned = any(
+            intent.path == path and intent.batch_id == batch_id
+            for intent in read_publish_intents(path.parent)
+        )
+        if not owned:
             raise JournalError("journal.invalid_publication_intent")
         try:
-            path.unlink(missing_ok=True)
+            path.unlink()
             _sync_directory(path.parent)
         except OSError as error:
             raise JournalError("journal.publication_intent_clear_failed") from error
