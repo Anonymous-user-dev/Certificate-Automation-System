@@ -47,6 +47,7 @@ class ProjectState:
     template_path: Path | None = None
     template_sha256: str | None = None
     template_inspection: Mapping[str, object] | None = None
+    layout_review: Mapping[str, object] | None = None
     output_options: Mapping[str, object] | None = None
     locale: str = "en"
     acknowledgements: tuple[str, ...] = ()
@@ -72,6 +73,7 @@ class ProjectState:
             "template_inspection",
             _frozen_json_mapping(self.template_inspection),
         )
+        object.__setattr__(self, "layout_review", _frozen_json_mapping(self.layout_review))
         object.__setattr__(
             self,
             "output_options",
@@ -105,6 +107,7 @@ class ProjectState:
             revision=self.revision + 1,
             template_sha256=current_hash,
             template_inspection=None,
+            layout_review=None,
             mapping_plan=None,
             acknowledgements=(),
             active_step="template",
@@ -119,6 +122,7 @@ class ProjectState:
             "template_path": str(self.template_path) if self.template_path else None,
             "template_sha256": self.template_sha256,
             "template_inspection": _plain_json(self.template_inspection),
+            "layout_review": _plain_json(self.layout_review),
             "output_options": _plain_json(self.output_options),
             "locale": self.locale,
             "acknowledgements": list(self.acknowledgements),
@@ -141,6 +145,7 @@ class ProjectState:
             template_path=payload.get("template_path"),
             template_sha256=payload.get("template_sha256"),
             template_inspection=payload.get("template_inspection"),
+            layout_review=payload.get("layout_review"),
             output_options=payload.get("output_options"),
             locale=str(payload.get("locale", "en")),
             acknowledgements=tuple(payload.get("acknowledgements", ())),

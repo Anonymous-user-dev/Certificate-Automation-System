@@ -20,6 +20,7 @@ from certificate_automation.mapping import ColumnValue, FormattedDateValue, Mapp
 from certificate_automation.output_options import OutputOptions
 from certificate_automation.project import ProjectState, ProjectStore
 from certificate_automation.template import inspect_template
+from certificate_automation.template_health import TemplateHealthService
 from certificate_automation.ui.workspace import WorkspaceWindow
 from certificate_automation.validation import ValidationReport, validate_preflight
 from certificate_automation.word import WordAvailability
@@ -57,6 +58,13 @@ def _dataset():
 
 
 def _services(tmp_path, template):
+    class LayoutConverter:
+        def convert(self, _source, destination):
+            writer = PdfWriter()
+            writer.add_blank_page(width=612, height=792)
+            with destination.open("wb") as stream:
+                writer.write(stream)
+
     generator = RecordingGenerator(tmp_path / "published")
     return SimpleNamespace(
         catalogs=CatalogSet.load(package_root(), "en"),
@@ -67,7 +75,17 @@ def _services(tmp_path, template):
         open_path=lambda path: True,
         generator=generator,
         template=template,
+        template_health_service=TemplateHealthService(LayoutConverter(), tmp_path / "layout-previews"),
     )
+
+
+def _finish_layout_review(window, qtbot):
+    qtbot.mouseClick(window.template_health_page.render_button, Qt.MouseButton.LeftButton)
+    assert window.template_health_page.layout_result.ready
+    for index in range(window.template_health_page.preview_selector.count()):
+        window.template_health_page.preview_selector.setCurrentIndex(index)
+    assert window.template_health_page.mark_reviewed_button.isEnabled()
+    qtbot.mouseClick(window.template_health_page.mark_reviewed_button, Qt.MouseButton.LeftButton)
 
 
 @pytest.mark.parametrize("locale", ["en", "zh_CN", "ru"])
@@ -92,9 +110,11 @@ def test_operator_can_complete_manual_combined_pdf_workflow(
     qtbot.mouseClick(window.data_page.continue_button, Qt.MouseButton.LeftButton)
     window.template_page.set_inspection(inspect_template(template_path))
     qtbot.mouseClick(window.template_page.continue_button, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(window.template_health_page.continue_button, Qt.MouseButton.LeftButton)
     window.match_page.cards["FULL_NAME"].set_column("Name")
     window.match_page.cards["AWARD"].set_column("Award")
     qtbot.mouseClick(window.match_page.continue_button, Qt.MouseButton.LeftButton)
+    _finish_layout_review(window, qtbot)
     window.review_page.select_recipient("row-2")
     qtbot.mouseClick(window.review_page.continue_button, Qt.MouseButton.LeftButton)
     destination = tmp_path / f"output-{locale}"
@@ -143,9 +163,11 @@ def test_operator_combined_only_creates_ordered_pdf_and_opens_published_file(
     qtbot.mouseClick(window.data_page.continue_button, Qt.MouseButton.LeftButton)
     window.template_page.set_inspection(inspect_template(template_path))
     qtbot.mouseClick(window.template_page.continue_button, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(window.template_health_page.continue_button, Qt.MouseButton.LeftButton)
     window.match_page.cards["FULL_NAME"].set_column("Name")
     window.match_page.cards["AWARD"].set_column("Award")
     qtbot.mouseClick(window.match_page.continue_button, Qt.MouseButton.LeftButton)
+    _finish_layout_review(window, qtbot)
     qtbot.mouseClick(window.review_page.continue_button, Qt.MouseButton.LeftButton)
     destination = tmp_path / "batches"
     destination.mkdir()
@@ -534,6 +556,9 @@ def test_navigation_and_generation_guards_explain_stale_or_invalid_state(
         template=template,
         plan=MappingPlan({"FULL_NAME": ColumnValue("name")}),
         outputs=options,
+    )
+    window._layout_review_key = TemplateHealthService.revision_key(
+        dataset, template, window.project_state.plan
     )
     services.validate = lambda *_args: ValidationReport((), {}, 0, dataset.revision + 1, template.sha256)
     window.start_generation()

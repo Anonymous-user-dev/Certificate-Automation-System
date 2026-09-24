@@ -35,6 +35,7 @@ from certificate_automation.template import (
     inspect_template,
     render_template,
 )
+from certificate_automation.template_health import TemplateHealthService
 from certificate_automation.validation import ValidationReport, validate_preflight
 from certificate_automation.verification import verify_docx, verify_pdf
 from certificate_automation.word import WordPdfConverter
@@ -154,6 +155,7 @@ class ApplicationServices:
     open_project: Callable[[Path], ProjectStore] | None = None
     word_availability: Callable | None = None
     preview_service: PreviewService | None = None
+    template_health_service: TemplateHealthService | None = None
     create_example: Callable[[Path], Path] | None = None
     example_root: Path | None = None
 
@@ -201,6 +203,7 @@ def create_default_services(locale: str = "en") -> ApplicationServices:
         open_project=ProjectStore.open,
         word_availability=converter.is_available,
         preview_service=PreviewService(converter),
+        template_health_service=TemplateHealthService(converter),
         create_example=lambda destination: create_example_project(
             package_root().parent.parent / "examples", destination
         ),

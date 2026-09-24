@@ -41,7 +41,8 @@ from certificate_automation.output_options import OutputOptions
 from certificate_automation.project import ProjectCoordinator, ProjectError, ProjectSaveError, ProjectState, ProjectStore
 from certificate_automation.project_catalog import ProjectCatalog
 from certificate_automation.project_migration import ProjectMigrationService
-from certificate_automation.template import inspect_template
+from certificate_automation.template import Placeholder, TemplateInspection, inspect_template
+from certificate_automation.template_health import TemplateHealthService
 from certificate_automation.ui.project_home_page import ProjectHomePage
 from certificate_automation.ui.data_page import DataPage, ImportPreviewDialog
 from certificate_automation.ui.match_page import MatchPage
@@ -49,14 +50,16 @@ from certificate_automation.ui.output_page import OutputPage
 from certificate_automation.ui.results_page import ResultsPage
 from certificate_automation.ui.review_page import ReviewPage
 from certificate_automation.ui.template_page import TemplatePage
+from certificate_automation.ui.template_health_page import TemplateHealthPage
 from certificate_automation.ui.theme import application_stylesheet
 from certificate_automation.ui.worker import GenerationWorker
 
 
-STEP_IDS = ("data", "template", "mapping", "review", "output", "generate")
+STEP_IDS = ("data", "template", "template_health", "mapping", "review", "output", "generate")
 STEP_KEYS = {
     "data": "nav.data",
     "template": "nav.template",
+    "template_health": "nav.template_health",
     "mapping": "nav.mapping",
     "review": "nav.review",
     "output": "nav.output",
@@ -205,6 +208,10 @@ class WorkspaceWindow(QMainWindow):
         self._hydrating_project = False
         self._restoring_mapping = False
         self._loaded_project: ProjectState | None = None
+        self._layout_review_key: str | None = None
+        self.template_health_service = getattr(services, "template_health_service", None) or TemplateHealthService(
+            getattr(getattr(services, "preview_service", None), "_converter", None)
+        )
         self._last_migration_backup: Path | None = None
         self.save_state = SaveState.SAVED
         catalog_dir = (
@@ -248,6 +255,9 @@ class WorkspaceWindow(QMainWindow):
         self.data_page.model.dataset_changed.connect(self._data_changed)
         self.template_page.template_selected.connect(self._select_template)
         self.template_page.inspection_accepted.connect(self._accept_template)
+        self.template_health_page.mapping_requested.connect(self._health_continue_mapping)
+        self.template_health_page.render_requested.connect(self._render_layout_review)
+        self.template_health_page.review_accepted.connect(self._accept_layout_review)
         self.match_page.plan_accepted.connect(self._accept_plan)
         self.match_page.plan_changed.connect(self._mapping_changed)
         self.match_page.save_profile_requested.connect(self._save_profile)
@@ -328,12 +338,14 @@ class WorkspaceWindow(QMainWindow):
         self._page_by_step["data"] = self.data_page
         self.page_stack.addWidget(self.data_page)
         self.template_page = TemplatePage(self.catalogs)
+        self.template_health_page = TemplateHealthPage(self.catalogs)
         self.match_page = MatchPage(self.catalogs)
         self.review_page = ReviewPage(self.catalogs)
         self.output_page = OutputPage(self.catalogs)
         self.results_page = ResultsPage(self.catalogs)
         pages = {
             "template": self.template_page,
+            "template_health": self.template_health_page,
             "mapping": self.match_page,
             "review": self.review_page,
             "output": self.output_page,
@@ -389,6 +401,7 @@ class WorkspaceWindow(QMainWindow):
         self.data_page.set_dataset(dataset)
         self.state = WorkspaceState(current_step="data", project_path=Path(path) if path else None)
         self.project_state = OperatorProjectState(dataset=dataset)
+        self._layout_review_key = None
         self._reset_workflow_pages(dataset)
         if store is not None:
             self._attach_store(store)
@@ -423,10 +436,18 @@ class WorkspaceWindow(QMainWindow):
         finally:
             self._hydrating_project = False
         self.project_state = restored
+        self._layout_review_key = (
+            str(project.layout_review.get("revision_key"))
+            if project.layout_review and restored.template is not None and restored.plan is not None
+            else None
+        )
         self._restoring_mapping = True
         self._reset_workflow_pages(project.dataset)
         if restored.template is not None:
             self.template_page.set_inspection(restored.template)
+            self.template_health_page.set_structure(
+                self.template_health_service.inspect_structure(restored.template.path)
+            )
         self.match_page.set_context(
             project.dataset,
             restored.template.names if restored.template is not None else (),
@@ -473,6 +494,8 @@ class WorkspaceWindow(QMainWindow):
 
     def _reset_workflow_pages(self, dataset: TabularDataset) -> None:
         self.template_page.clear_inspection()
+        self.template_health_page.clear_structure()
+        self.template_health_service.clear()
         self.match_page.set_context(dataset, ())
         self.review_page.clear_context()
         self.output_page.reset_options()
@@ -533,6 +556,14 @@ class WorkspaceWindow(QMainWindow):
                 repair_code = "project.resume_output_repair"
         elif restored.plan is not None and project.active_step == "generate":
             repair_code = "project.resume_output_repair"
+        if restored.template is not None and restored.plan is not None:
+            expected_key = self.template_health_service.revision_key(
+                project.dataset, restored.template, restored.plan
+            )
+            saved_key = project.layout_review.get("revision_key") if project.layout_review else None
+            if saved_key != expected_key and project.active_step in {"review", "output", "generate"}:
+                maximum = "template_health"
+                repair_code = "project.resume_layout_repair"
         requested = project.active_step if project.active_step in STEP_IDS else "data"
         target = STEP_IDS[min(STEP_IDS.index(requested), STEP_IDS.index(maximum))]
         if requested != target and repair_code is None:
@@ -552,10 +583,12 @@ class WorkspaceWindow(QMainWindow):
         cleared = {"revision": project.revision + 1, "active_step": target,
                    "approval": None, "preview_revision": None}
         if maximum == "template":
-            cleared.update(template_inspection=None, mapping_plan=None,
+            cleared.update(template_inspection=None, layout_review=None, mapping_plan=None,
                            output_options=None, acknowledgements=())
+        elif maximum == "template_health":
+            cleared.update(layout_review=None, acknowledgements=())
         elif maximum == "mapping":
-            cleared.update(mapping_plan=None, output_options=None, acknowledgements=())
+            cleared.update(layout_review=None, mapping_plan=None, output_options=None, acknowledgements=())
         elif maximum == "output":
             cleared.update(output_options=None)
         return replace(project, **cleared)
@@ -610,6 +643,12 @@ class WorkspaceWindow(QMainWindow):
         template_controls = (
             self.template_page.choose_button, self.template_page.continue_button,
         )
+        health_controls = (
+            self.template_health_page.continue_button,
+            self.template_health_page.expected_pages,
+            self.template_health_page.render_button,
+            self.template_health_page.mark_reviewed_button,
+        )
         review_controls = (
             self.review_page.preview_button, self.review_page.acknowledge_button,
             self.review_page.continue_button,
@@ -620,7 +659,7 @@ class WorkspaceWindow(QMainWindow):
             self.output_page.browse_button, self.output_page.batch_name,
             self.output_page.continue_button,
         )
-        for control in (*data_controls, *template_controls, *review_controls, *output_controls):
+        for control in (*data_controls, *template_controls, *health_controls, *review_controls, *output_controls):
             control.setEnabled(not read_only)
         for card in self.match_page.cards.values():
             for control in (
@@ -648,6 +687,9 @@ class WorkspaceWindow(QMainWindow):
             self.template_page.continue_button.setEnabled(
                 bool(self.template_page.inspection and self.template_page.inspection.placeholders)
             )
+            self.template_health_page.continue_button.setEnabled(bool(
+                self.template_health_page._structure and not self.template_health_page._structure.blocking
+            ))
 
     def _set_save_state(self, state: SaveState) -> None:
         self.save_state = state
@@ -690,6 +732,12 @@ class WorkspaceWindow(QMainWindow):
             template_sha256=template.sha256 if template is not None else self._loaded_project.template_sha256,
             mapping_plan=current.plan.to_json() if current.plan is not None else None,
             output_options=current.outputs.to_json() if current.outputs is not None else None,
+            layout_review=(
+                self._loaded_project.layout_review
+                if self._loaded_project.layout_review
+                and self._loaded_project.layout_review.get("revision_key") == self._layout_review_key
+                else None
+            ),
             locale=self.catalogs.locale,
             active_step=self.current_step,
         )
@@ -730,8 +778,13 @@ class WorkspaceWindow(QMainWindow):
             ),
             len(STEP_IDS) - 1,
         )
-        if target > first_incomplete:
-            required = STEP_IDS[first_incomplete]
+        required = STEP_IDS[first_incomplete]
+        mapping_return = (
+            required == "template_health"
+            and step == "mapping"
+            and self.project_state.plan is not None
+        )
+        if target > first_incomplete and not mapping_return:
             code = (
                 "navigation.complete_data_first"
                 if required == "data"
@@ -1007,6 +1060,9 @@ class WorkspaceWindow(QMainWindow):
             outputs=None,
             warning_ack_revision=None,
         )
+        self._layout_review_key = None
+        self.template_health_page.clear_layout()
+        self.template_health_service.clear()
         self.state = replace(
             self.state,
             completed_steps=completed,
@@ -1016,6 +1072,7 @@ class WorkspaceWindow(QMainWindow):
             self._loaded_project = replace(
                 self._loaded_project,
                 acknowledgements=(), approval=None, preview_revision=None,
+                layout_review=None,
             )
         self.review_page.clear_preview()
         self.review_page.set_issues(())
@@ -1027,9 +1084,23 @@ class WorkspaceWindow(QMainWindow):
         try:
             inspection = self.services.inspect_template(Path(path))
         except Exception as error:
-            self.template_page.show_template_error(
-                getattr(error, "code", "template.invalid")
+            if Path(path).suffix.casefold() != ".docx":
+                self.template_page.show_template_error(getattr(error, "code", "template.invalid"))
+                return
+            report = self.template_health_service.inspect_structure(Path(path))
+            if not report.template_sha256:
+                self.template_page.show_template_error(getattr(error, "code", "template.invalid"))
+                return
+            inspection = TemplateInspection(
+                Path(path),
+                tuple(
+                    Placeholder(name, len(locations), tuple(dict.fromkeys(item.part for item in locations)))
+                    for name, locations in report.placeholders.items()
+                ),
+                report.template_sha256,
             )
+            self.template_page.set_inspection(inspection)
+            self._accept_template(inspection)
             return
         self.template_page.set_inspection(inspection)
         if self._loaded_project is not None and (
@@ -1040,6 +1111,9 @@ class WorkspaceWindow(QMainWindow):
                 self.project_state, template=None, plan=None, outputs=None,
                 warning_ack_revision=None,
             )
+            self._layout_review_key = None
+            self.template_health_page.clear_layout()
+            self.template_health_service.clear()
             self._loaded_project = replace(
                 self._loaded_project,
                 template_path=inspection.path,
@@ -1050,6 +1124,7 @@ class WorkspaceWindow(QMainWindow):
                 acknowledgements=(),
                 approval=None,
                 preview_revision=None,
+                layout_review=None,
             )
             self.review_page.clear_preview()
             self.review_page.set_issues(())
@@ -1071,6 +1146,12 @@ class WorkspaceWindow(QMainWindow):
             outputs=None,
             warning_ack_revision=None,
         )
+        self._layout_review_key = None
+        self.template_health_page.clear_layout()
+        self.template_health_service.clear()
+        self.template_health_page.set_structure(
+            self.template_health_service.inspect_structure(inspection.path)
+        )
         self.match_page.set_context(
             self.project_state.dataset,
             inspection.names,
@@ -1082,10 +1163,18 @@ class WorkspaceWindow(QMainWindow):
                 template_sha256=inspection.sha256,
                 template_inspection={"sha256": inspection.sha256, "names": list(inspection.names)},
                 acknowledgements=(), approval=None, preview_revision=None,
+                layout_review=None,
             )
         self.state = replace(self.state, project_revision=self.state.project_revision + 1)
         self._mark_project_dirty()
         self.mark_step_complete("template")
+        self.navigate("template_health")
+
+    def _health_continue_mapping(self) -> None:
+        report = self.template_health_page._structure
+        if self._read_only or report is None or report.blocking:
+            return
+        self.mark_step_complete("template_health")
         self.navigate("mapping")
 
     def _accept_plan(self, plan: MappingPlan) -> None:
@@ -1097,9 +1186,69 @@ class WorkspaceWindow(QMainWindow):
             outputs=None,
             warning_ack_revision=None,
         )
+        self._layout_review_key = None
+        self.template_health_page.clear_layout()
+        self.template_health_service.clear()
+        if self._loaded_project is not None:
+            self._loaded_project = replace(self._loaded_project, layout_review=None)
         self.review_page.set_context(self.project_state.dataset, plan)
         self.state = replace(self.state, project_revision=self.state.project_revision + 1)
         self._mark_project_dirty()
+        self.mark_step_complete("mapping")
+        self.state = replace(
+            self.state,
+            completed_steps=tuple(
+                step for step in self.state.completed_steps if step != "template_health"
+            ),
+        )
+        self._show_step("template_health")
+
+    def _render_layout_review(self, expected_pages: int) -> None:
+        if self._read_only:
+            return
+        current = self.project_state
+        if not all((current.dataset, current.template, current.plan)):
+            self.banner.show_issue(
+                "navigation.complete_previous", self.catalogs.text("navigation.complete_previous")
+            )
+            return
+        self.template_health_page.clear_layout()
+        self.template_health_service.clear()
+        try:
+            result = self.template_health_service.render_representatives(
+                current.dataset, current.template, current.plan, expected_pages=expected_pages
+            )
+        except Exception:
+            self.banner.show_issue("preview.render_failed", self.catalogs.text("preview.render_failed", row="—"))
+            return
+        self.template_health_page.set_layout_result(result)
+
+    def _accept_layout_review(self, revision_key: str) -> None:
+        if self._read_only:
+            return
+        current = self.project_state
+        result = self.template_health_page.layout_result
+        if not all((current.dataset, current.template, current.plan)) or result is None or not result.ready:
+            return
+        expected_key = self.template_health_service.revision_key(
+            current.dataset, current.template, current.plan
+        )
+        if revision_key != expected_key or not self.template_health_page.mark_reviewed_button.isEnabled():
+            return
+        self._layout_review_key = revision_key
+        if self._loaded_project is not None:
+            self._loaded_project = replace(
+                self._loaded_project,
+                layout_review={
+                    "revision_key": revision_key,
+                    "preview_hashes": [preview.pdf_sha256 for preview in result.previews],
+                    "representative_rows": [preview.row_id for preview in result.previews],
+                    "expected_pages": self.template_health_page.expected_pages.value(),
+                },
+            )
+        self.state = replace(self.state, project_revision=self.state.project_revision + 1)
+        self._mark_project_dirty()
+        self.mark_step_complete("template_health")
         self.mark_step_complete("mapping")
         self.navigate("review")
 
@@ -1108,9 +1257,12 @@ class WorkspaceWindow(QMainWindow):
         self.project_state = replace(
             self.project_state, plan=previous_plan, outputs=None, warning_ack_revision=None,
         )
+        self._layout_review_key = None
+        self.template_health_page.clear_layout()
+        self.template_health_service.clear()
         self.state = replace(
             self.state,
-            completed_steps=tuple(step for step in self.state.completed_steps if step in {"data", "template"}),
+            completed_steps=tuple(step for step in self.state.completed_steps if step in {"data", "template", "template_health"}),
             project_revision=self.state.project_revision + 1,
         )
         if self._loaded_project is not None:
@@ -1119,6 +1271,7 @@ class WorkspaceWindow(QMainWindow):
                 mapping_plan=previous_plan.to_json() if previous_plan else None,
                 output_options=None,
                 acknowledgements=(), approval=None, preview_revision=None,
+                layout_review=None,
             )
         self.review_page.clear_context()
         self.review_page.clear_preview()
@@ -1289,6 +1442,28 @@ class WorkspaceWindow(QMainWindow):
                 self.catalogs.text("navigation.complete_previous"),
             )
             return
+        expected_layout_key = self.template_health_service.revision_key(
+            current.dataset, current.template, current.plan
+        )
+        structure = self.template_health_service.inspect_structure(current.template.path)
+        if structure.template_sha256 != current.template.sha256:
+            self._layout_review_key = None
+            self.banner.show_issue(
+                "validation.template_changed",
+                self.catalogs.text("validation.template_changed"),
+            )
+            self._show_step("template")
+            return
+        if (
+            self._layout_review_key != expected_layout_key
+            or structure.blocking
+        ):
+            self.banner.show_issue(
+                "template.layout_review_required",
+                self.catalogs.text("template.layout_review_required"),
+            )
+            self._show_step("template_health")
+            return
         report = self.services.validate(
             current.dataset,
             current.template,
@@ -1425,6 +1600,8 @@ class WorkspaceWindow(QMainWindow):
                     return
                 break
         preview_service = getattr(self.services, "preview_service", None)
+        self.template_health_page.clear_layout()
+        self.template_health_service.clear()
         if preview_service is not None:
             self.review_page.clear_preview()
             preview_service.clear()

@@ -7,6 +7,7 @@ from hashlib import sha256
 import json
 import sqlite3
 from threading import Event
+from pypdf import PdfWriter
 
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QAbstractButton, QAbstractItemView, QComboBox, QLineEdit, QMessageBox, QTableView
@@ -16,7 +17,7 @@ from certificate_automation.i18n import CatalogSet, package_root
 from certificate_automation.dataset import Column, DataRow, TabularDataset
 from certificate_automation.domain import BatchResult, BatchState
 from certificate_automation.output_options import OutputOptions
-from certificate_automation.mapping import ColumnValue, FixedValue, MappingPlan
+from certificate_automation.mapping import ColumnValue, FixedValue, JoinValue, MappingPlan
 from certificate_automation.profiles import MappingProfile, ProfileStore
 from certificate_automation.ui.workspace import WorkspaceWindow
 from certificate_automation.ui.workspace import SaveState
@@ -24,7 +25,133 @@ from certificate_automation.project import ProjectCorruptError, ProjectError, Pr
 from certificate_automation.validation import ValidationReport
 from certificate_automation.word import WordAvailability
 from certificate_automation.template import inspect_template
+from certificate_automation.template_health import TemplateHealthService
 from fixtures import docx_factory
+
+
+def test_template_health_step_runs_before_mapping_and_returns_for_layout_review(
+    workspace, tmp_path, docx_factory
+):
+    workspace.new_project(tmp_path / "Health.certproject")
+    workspace._accept_data(workspace.project_state.dataset)
+    workspace.services.inspect_template = inspect_template
+    template = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
+
+    workspace._select_template(template)
+    workspace._accept_template(workspace.template_page.inspection)
+
+    assert workspace.current_step == "template_health"
+    assert workspace.template_health_page.must_fix_list.count() == 0
+    workspace.template_health_page.continue_button.click()
+    assert workspace.current_step == "mapping"
+
+    workspace._accept_plan(MappingPlan({"FULL_NAME": ColumnValue("column-1")}))
+
+    assert workspace.current_step == "template_health"
+    assert not workspace.template_health_page.mark_reviewed_button.isEnabled()
+    workspace.navigate("review")
+    assert workspace.current_step == "template_health"
+    workspace.navigate("mapping")
+    assert workspace.current_step == "mapping"
+
+
+def test_malformed_word_template_opens_health_repair_step(workspace, tmp_path, docx_factory):
+    workspace.new_project(tmp_path / "Malformed.certproject")
+    workspace._accept_data(workspace.project_state.dataset)
+    workspace.services.inspect_template = inspect_template
+    template = docx_factory(paragraph_runs=[["{{FULL_NAME}"]])
+
+    workspace._select_template(template)
+
+    assert workspace.current_step == "template_health"
+    assert workspace.template_health_page.must_fix_list.count() >= 1
+    assert not workspace.template_health_page.continue_button.isEnabled()
+
+
+def test_rendered_layout_review_unlocks_review_only_after_pdf_visit(
+    workspace, tmp_path, docx_factory
+):
+    class Converter:
+        def convert(self, _source, destination):
+            writer = PdfWriter()
+            writer.add_blank_page(width=612, height=792)
+            with destination.open("wb") as stream:
+                writer.write(stream)
+
+    workspace.template_health_service = TemplateHealthService(Converter(), tmp_path / "layout")
+    path = tmp_path / "Layout.certproject"
+    workspace.new_project(path)
+    workspace._accept_data(workspace.project_state.dataset)
+    workspace.services.inspect_template = inspect_template
+    workspace._select_template(docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    workspace._accept_template(workspace.template_page.inspection)
+    workspace.template_health_page.continue_button.click()
+    workspace._accept_plan(MappingPlan({"FULL_NAME": ColumnValue("column-1")}))
+
+    workspace.template_health_page.render_button.click()
+    assert workspace.current_step == "template_health"
+    assert workspace.template_health_page.mark_reviewed_button.isEnabled()
+    workspace.template_health_page.mark_reviewed_button.click()
+
+    assert workspace.current_step == "review"
+    assert workspace.coordinator.flush()
+    stored = ProjectStore.open(path).load()
+    assert stored.layout_review["revision_key"] == workspace._layout_review_key
+    assert len(stored.layout_review["preview_hashes"]) == 1
+
+
+def test_generation_refuses_unreviewed_current_layout(workspace, tmp_path, docx_factory):
+    workspace.new_project(tmp_path / "Unreviewed.certproject")
+    template = inspect_template(docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    plan = MappingPlan({"FULL_NAME": ColumnValue("column-1")})
+    workspace.project_state = replace(
+        workspace.project_state, template=template, plan=plan,
+        outputs=OutputOptions(True, False, False, tmp_path, "Batch", workspace.project_state.dataset.order),
+    )
+
+    workspace.start_generation()
+
+    assert workspace.current_step == "template_health"
+    assert workspace.banner.issue_code == "template.layout_review_required"
+    assert workspace._thread is None
+
+
+def test_data_revision_invalidates_layout_review(workspace, tmp_path, docx_factory):
+    workspace.new_project(tmp_path / "Revision.certproject")
+    template = inspect_template(docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    plan = MappingPlan({"FULL_NAME": ColumnValue("column-1")})
+    workspace.project_state = replace(workspace.project_state, template=template, plan=plan)
+    workspace._layout_review_key = TemplateHealthService.revision_key(
+        workspace.project_state.dataset, template, plan
+    )
+
+    dataset = workspace.project_state.dataset.with_cell("row-1", "column-1", "Changed")
+    workspace._data_changed(dataset)
+
+    assert workspace._layout_review_key is None
+
+
+def test_project_persists_layout_review_binding(workspace, tmp_path, docx_factory):
+    path = tmp_path / "Reviewed.certproject"
+    workspace.new_project(path)
+    template = inspect_template(docx_factory(paragraph_runs=[["{{FULL_NAME}}"]]))
+    plan = MappingPlan({"FULL_NAME": ColumnValue("column-1")})
+    key = TemplateHealthService.revision_key(workspace.project_state.dataset, template, plan)
+    workspace.project_state = replace(workspace.project_state, template=template, plan=plan)
+    workspace._layout_review_key = key
+    workspace._loaded_project = replace(
+        workspace._loaded_project,
+        template_inspection={"sha256": template.sha256, "names": list(template.names)},
+        layout_review={"revision_key": key, "preview_hashes": ["a" * 64]},
+    )
+    workspace.state = replace(workspace.state, project_revision=workspace.state.project_revision + 1)
+    workspace._mark_project_dirty()
+    assert workspace.coordinator.flush()
+
+    reopened = ProjectStore.open(path).load()
+
+    assert reopened.layout_review["revision_key"] == key
+    assert reopened.layout_review["preview_hashes"] == ["a" * 64]
 
 
 @pytest.fixture
@@ -160,6 +287,9 @@ def _saved_with_downstream_state(workspace, path, template_path, tmp_path):
     workspace.new_project(path)
     original = ProjectStore.open(path).load()
     inspection = inspect_template(template_path)
+    review_key = TemplateHealthService.revision_key(
+        original.dataset, inspection, MappingPlan({"FULL_NAME": ColumnValue("column-1")})
+    )
     (tmp_path / "output").mkdir(exist_ok=True)
     stored = replace(
         original,
@@ -167,6 +297,7 @@ def _saved_with_downstream_state(workspace, path, template_path, tmp_path):
         template_path=template_path,
         template_sha256=inspection.sha256,
         template_inspection={"sha256": inspection.sha256, "names": ["FULL_NAME"]},
+        layout_review={"revision_key": review_key, "preview_hashes": ["a" * 64]},
         mapping_plan={"FULL_NAME": {"type": "column", "column_id": "column-1"}},
         output_options={
             "docx": True, "individual_pdf": False, "combined_pdf": False,
@@ -297,6 +428,9 @@ def test_custom_join_mapping_survives_reopen_navigation_and_save(
         mapping_plan={"FULL_NAME": {
             "type": "join", "column_ids": ["last", "first"], "separator": ", "
         }},
+        layout_review={"revision_key": TemplateHealthService.revision_key(
+            dataset, inspection, MappingPlan({"FULL_NAME": JoinValue(("last", "first"), ", ")})
+        ), "preview_hashes": ["a" * 64]},
         active_step="review",
     )
     ProjectStore.open(path).save(stored)
