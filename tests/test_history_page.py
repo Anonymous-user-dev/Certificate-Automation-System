@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from PySide6.QtWidgets import QMessageBox
 
@@ -98,3 +99,61 @@ def test_history_discovers_revision_folder_when_private_index_is_unavailable(qtb
     assert len(page.records) == 1
     assert page.records[0].path == folder
     assert page.records[0].status == "damaged"
+
+
+def test_locked_destination_keeps_other_history_visible_and_disables_local_actions(qtbot, tmp_path, monkeypatch):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    elsewhere = tmp_path / "elsewhere" / "Awards-revision-1"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "manifest.json").write_text("{}", encoding="utf-8")
+    original_iterdir = Path.iterdir
+
+    def inaccessible(self):
+        if self == locked:
+            raise PermissionError("access denied")
+        return original_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", inaccessible)
+    catalogs = CatalogSet.load(package_root(), "en")
+    page = HistoryPage(catalogs)
+    qtbot.addWidget(page)
+
+    page.load(locked, published_paths=(elsewhere,))
+
+    assert len(page.records) == 1
+    assert page.records[0].path == elsewhere
+    assert page.records[0].status == "damaged"
+    assert page.status_label.text() == catalogs.text("history.scan_unavailable")
+    opened = []
+    page.open_path_requested.connect(opened.append)
+    assert page.action_button(0, "open_folder").isEnabled()
+    page.action_button(0, "open_folder").click()
+    assert opened == [elsewhere]
+    assert not page.action_button(0, "open_combined").isEnabled()
+    assert not page.action_button(0, "correct").isEnabled()
+    for locale in ("ru", "zh_CN"):
+        catalogs.set_locale(locale)
+        assert page.status_label.text() == catalogs.text("history.scan_unavailable")
+
+
+def test_record_stat_failure_is_unavailable_with_actions_disabled(qtbot, tmp_path, monkeypatch):
+    folder = tmp_path / "Awards-revision-1"
+    folder.mkdir()
+    original_is_dir = Path.is_dir
+
+    def denied(self):
+        if self == folder:
+            raise PermissionError("locked")
+        return original_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", denied)
+    catalogs = CatalogSet.load(package_root(), "en")
+    page = HistoryPage(catalogs)
+    qtbot.addWidget(page)
+
+    page.load(tmp_path, published_paths=(folder,))
+
+    assert page.records[0].status == "unavailable"
+    assert not any(page.action_button(0, action).isEnabled() for action in
+                   ("open_folder", "open_combined", "open_audit", "verify", "correct", "remove"))

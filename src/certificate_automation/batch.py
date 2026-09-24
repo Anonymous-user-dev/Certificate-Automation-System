@@ -68,20 +68,21 @@ def _destination_lock(destination: Path):
     descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     locked = False
     try:
-        if os.name == "nt":
-            import msvcrt
-            if os.fstat(descriptor).st_size == 0:
-                os.write(descriptor, b"\0")
-                os.fsync(descriptor)
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                if os.fstat(descriptor).st_size == 0:
+                    os.write(descriptor, b"\0")
+                    os.fsync(descriptor)
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, PermissionError) as error:
+            raise BatchGenerationError("The output folder is busy.", code="output.destination_busy") from error
         locked = True
         yield
-    except (BlockingIOError, PermissionError) as error:
-        raise BatchGenerationError("The output folder is busy.", code="output.destination_busy") from error
     finally:
         if locked:
             if os.name == "nt":
@@ -509,7 +510,14 @@ class BatchGenerator:
             match = matcher.fullmatch(candidate.name)
             if match:
                 existing.append(int(match.group(1)))
-        for intent in read_publish_intents(destination):
+        try:
+            pending_intents = read_publish_intents(destination)
+        except OSError as error:
+            raise BatchGenerationError(
+                "Publication intent files could not be read; no official batch was started.",
+                code="output.publication_intent_unavailable",
+            ) from error
+        for intent in pending_intents:
             match = matcher.fullmatch(intent.final_name)
             if match and int(match.group(1)) == intent.revision:
                 existing.append(intent.revision)

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+import pytest
 
 from certificate_automation.recovery import RecoveryService
 
@@ -50,3 +53,83 @@ def test_recovery_rejects_malformed_and_traversal_publish_intents(tmp_path):
     (tmp_path / f"{prefix}malformed.json").write_text(json.dumps(malformed), encoding="utf-8")
 
     assert RecoveryService().find_incomplete(tmp_path) == ()
+
+
+def test_recovery_glob_denial_reports_uncertain_root_without_deleting(tmp_path, monkeypatch):
+    from certificate_automation.recovery import RecoveryScanError
+    incomplete = tmp_path / ".certificate-incomplete-safe"
+    incomplete.mkdir()
+    original_glob = Path.glob
+
+    def denied(self, pattern):
+        if self == tmp_path:
+            raise PermissionError("glob denied")
+        return original_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", denied)
+    with pytest.raises(RecoveryScanError) as caught:
+        RecoveryService().find_incomplete(tmp_path)
+    assert caught.value.code == "recovery.scan_unavailable"
+    assert caught.value.root_unavailable
+    assert incomplete.is_dir()
+
+
+def test_recovery_journal_open_denial_keeps_partial_safe_records(tmp_path, monkeypatch):
+    from certificate_automation.recovery import RecoveryScanError
+    incomplete = tmp_path / ".certificate-incomplete-safe"
+    incomplete.mkdir()
+    revision = tmp_path / "Awards-revision-1"
+    revision.mkdir()
+    journal = revision / "batch_journal.json"
+    journal.write_text("{}", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def denied(self, *args, **kwargs):
+        if self == journal:
+            raise PermissionError("journal locked")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(RecoveryScanError) as caught:
+        RecoveryService().find_incomplete(tmp_path)
+    assert any(record.path == incomplete for record in caught.value.records)
+    assert revision in caught.value.unavailable_paths
+    assert incomplete.is_dir() and revision.is_dir()
+
+
+def test_recovery_disappearing_entry_reports_uncertainty_without_mutation(tmp_path, monkeypatch):
+    from certificate_automation.recovery import RecoveryScanError
+    disappearing = tmp_path / ".certificate-incomplete-vanished"
+    disappearing.mkdir()
+    original_is_dir = Path.is_dir
+
+    def vanished(self):
+        if self == disappearing:
+            raise FileNotFoundError("moved during scan")
+        return original_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", vanished)
+    with pytest.raises(RecoveryScanError) as caught:
+        RecoveryService().find_incomplete(tmp_path)
+    assert disappearing in caught.value.unavailable_paths
+    assert disappearing.exists()
+
+
+def test_unreadable_publish_intent_cannot_be_silently_ignored(tmp_path, monkeypatch):
+    from certificate_automation.batch_journal import BatchJournal
+    from certificate_automation.recovery import RecoveryScanError
+    intent = BatchJournal.create_publish_intent(
+        tmp_path, "batch-locked", "Awards-revision-1", "a" * 64, 1,
+    )
+    original_read_text = Path.read_text
+
+    def denied(self, *args, **kwargs):
+        if self == intent:
+            raise PermissionError("intent locked")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(RecoveryScanError) as caught:
+        RecoveryService().find_incomplete(tmp_path)
+    assert caught.value.root_unavailable
+    assert intent.exists()

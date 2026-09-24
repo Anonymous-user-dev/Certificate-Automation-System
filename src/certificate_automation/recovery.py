@@ -28,20 +28,47 @@ class DraftProjectBackup:
     slot: int
 
 
+class RecoveryScanError(RuntimeError):
+    """A scan is incomplete; carry safe discoveries without claiming completeness."""
+
+    def __init__(
+        self, records: tuple[IncompleteBatch, ...] = (),
+        unavailable_paths: tuple[Path, ...] = (), *, root_unavailable: bool = False,
+    ) -> None:
+        super().__init__("recovery.scan_unavailable")
+        self.code = "recovery.scan_unavailable"
+        self.records = records
+        self.unavailable_paths = unavailable_paths
+        self.root_unavailable = root_unavailable
+
+
 class RecoveryService:
     def find_incomplete(self, destination: Path) -> tuple[IncompleteBatch, ...]:
         destination = Path(destination)
-        if not destination.is_dir():
-            return ()
+        try:
+            if not destination.is_dir():
+                return ()
+            children = tuple(sorted(destination.iterdir(), key=lambda item: item.name.casefold()))
+        except OSError as error:
+            raise RecoveryScanError(unavailable_paths=(destination,), root_unavailable=True) from error
         records: list[IncompleteBatch] = []
-        intents = read_publish_intents(destination)
+        unavailable: list[Path] = []
+        root_unavailable = False
+        try:
+            intents = read_publish_intents(destination)
+        except OSError:
+            intents = ()
+            root_unavailable = True
+            unavailable.append(destination)
         consumed_intents: set[Path] = set()
-        for path in sorted(destination.iterdir(), key=lambda item: item.name.casefold()):
-            if (
-                path.is_dir()
-                and not path.is_symlink()
-                and path.name.startswith(INCOMPLETE_PREFIX)
-            ):
+        for path in children:
+            try:
+                is_directory = path.is_dir()
+                is_symlink = path.is_symlink()
+            except OSError:
+                unavailable.append(path)
+                continue
+            if is_directory and not is_symlink and path.name.startswith(INCOMPLETE_PREFIX):
                 records.append(
                     IncompleteBatch(
                         path.name[len(INCOMPLETE_PREFIX) :],
@@ -50,13 +77,13 @@ class RecoveryService:
                     )
                 )
                 continue
-            if not path.is_dir() or path.is_symlink() or "-revision-" not in path.name:
+            if not is_directory or is_symlink or "-revision-" not in path.name:
                 continue
             journal = path / "batch_journal.json"
             marker = path / ".certificate-publication-failed.json"
-            if not journal.is_file() or journal.is_symlink():
-                continue
             try:
+                if not journal.is_file() or journal.is_symlink():
+                    continue
                 payload = json.loads(journal.read_text("utf-8"))
                 if (
                     payload.get("schema_version") != 1
@@ -64,7 +91,10 @@ class RecoveryService:
                 ):
                     continue
                 batch_id = payload["batch_id"]
-            except (OSError, KeyError, ValueError, TypeError):
+            except OSError:
+                unavailable.append(path)
+                continue
+            except (KeyError, ValueError, TypeError):
                 continue
             intent = next(
                 (
@@ -81,22 +111,25 @@ class RecoveryService:
             interrupted = payload.get("state") == "ready_to_publish"
             if payload.get("state") == "published":
                 from certificate_automation.integrity import IntegrityService
-                marker_exists = marker.is_file() and not marker.is_symlink()
-                interrupted = (
-                    intent is not None
-                    or marker_exists
-                    or not IntegrityService().verify_revision(path).valid
-                )
+                try:
+                    marker_exists = marker.is_file() and not marker.is_symlink()
+                    interrupted = (
+                        intent is not None
+                        or marker_exists
+                        or not IntegrityService().verify_revision(path).valid
+                    )
+                except OSError:
+                    unavailable.append(path)
+                    continue
             if interrupted:
                 if intent is not None:
                     consumed_intents.add(intent.path)
-                diagnostic = (
-                    marker
-                    if marker.is_file() and not marker.is_symlink()
-                    else intent.path
-                    if intent is not None
-                    else journal
-                )
+                try:
+                    has_marker = marker.is_file() and not marker.is_symlink()
+                except OSError:
+                    unavailable.append(path)
+                    continue
+                diagnostic = marker if has_marker else intent.path if intent is not None else journal
                 records.append(IncompleteBatch(batch_id, path, diagnostic, True))
 
         for intent in intents:
@@ -109,6 +142,10 @@ class RecoveryService:
                     intent.path,
                     True,
                 )
+            )
+        if unavailable:
+            raise RecoveryScanError(
+                tuple(records), tuple(dict.fromkeys(unavailable)), root_unavailable=root_unavailable,
             )
         return tuple(records)
 

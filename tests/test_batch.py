@@ -771,6 +771,27 @@ def test_pending_intent_reserves_revision_number(tmp_path, docx_factory):
     assert result.revision_number == 2
 
 
+def test_unreadable_publish_intent_blocks_revision_allocation_before_staging(tmp_path, docx_factory, monkeypatch):
+    from certificate_automation.batch_journal import BatchJournal
+    request = _typed_request(tmp_path, docx_factory)
+    intent = BatchJournal.create_publish_intent(
+        request.destination, "batch-locked", "Awards-revision-1", "a" * 64, 1,
+    )
+    original_read_text = Path.read_text
+
+    def denied(self, *args, **kwargs):
+        if self == intent:
+            raise PermissionError("intent locked")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(BatchGenerationError) as caught:
+        _generator(FakeConverter()).generate(request)
+    assert caught.value.code == "output.publication_intent_unavailable"
+    assert not list(request.destination.glob(".certificate-incomplete-*"))
+    assert intent.exists()
+
+
 def test_clear_publish_intent_requires_matching_batch_ownership(tmp_path):
     from certificate_automation.batch_journal import BatchJournal, JournalError
 

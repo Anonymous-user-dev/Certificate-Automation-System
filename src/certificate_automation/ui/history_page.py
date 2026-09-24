@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 from certificate_automation.history import HistoryError, HistoryIndex
 from certificate_automation.i18n import CatalogSet
 from certificate_automation.integrity import IntegrityService
-from certificate_automation.recovery import IncompleteBatch, RecoveryService
+from certificate_automation.recovery import IncompleteBatch, RecoveryScanError, RecoveryService
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +54,7 @@ class HistoryPage(QWidget):
         self.records: tuple[HistoryRecord, ...] = ()
         self._destination: Path | None = None
         self._published_paths: tuple[Path, ...] = ()
+        self._scan_unavailable = False
         self._rows: list[tuple[QLabel, dict[str, QPushButton]]] = []
         self.title = QLabel()
         self.title.setProperty("role", "title")
@@ -78,6 +79,9 @@ class HistoryPage(QWidget):
     def load(self, destination: Path, *, published_paths: tuple[Path, ...] = ()) -> None:
         self._destination = Path(destination)
         self._published_paths = tuple(Path(path) for path in published_paths)
+        self._scan_unavailable = False
+        unavailable_paths: set[Path] = set()
+        root_unavailable = False
         candidates: dict[Path, tuple[str, int | None]] = {}
         if self.history_index is not None:
             try:
@@ -87,26 +91,56 @@ class HistoryPage(QWidget):
                 self.status_label.setText(self.catalogs.text("history.unavailable"))
         for path in self._published_paths:
             candidates.setdefault(path, (path.name, None))
-        if self._destination.is_dir():
-            for path in self._destination.iterdir():
-                match = re.search(r"-revision-(\d+)$", path.name, re.IGNORECASE)
-                if (
-                    match is not None and path.is_dir() and not path.is_symlink()
+        try:
+            children = tuple(self._destination.iterdir()) if self._destination.is_dir() else ()
+        except OSError:
+            children = ()
+            root_unavailable = True
+        for path in children:
+            match = re.search(r"-revision-(\d+)$", path.name, re.IGNORECASE)
+            if match is None:
+                continue
+            try:
+                visible = (
+                    path.is_dir() and not path.is_symlink()
                     and (path / "manifest.json").is_file()
                     and (path / "batch_journal.json").is_file()
-                ):
-                    candidates.setdefault(path, (path.name, int(match.group(1))))
+                )
+            except OSError:
+                unavailable_paths.add(path)
+                candidates.setdefault(path, (path.name, int(match.group(1))))
+                continue
+            if visible:
+                candidates.setdefault(path, (path.name, int(match.group(1))))
+        try:
+            incomplete_records = self.recovery.find_incomplete(self._destination)
+        except RecoveryScanError as error:
+            incomplete_records = error.records
+            root_unavailable |= error.root_unavailable
+            unavailable_paths.update(error.unavailable_paths)
+        self._scan_unavailable = root_unavailable or bool(unavailable_paths)
+        if self._scan_unavailable:
+            self.status_label.setText(self.catalogs.text("history.scan_unavailable"))
         records = []
         for path, (batch_id, revision) in candidates.items():
-            if not path.is_dir() or path.is_symlink():
-                status = "missing"
+            if path in unavailable_paths or root_unavailable and path.parent == self._destination:
+                status = "unavailable"
             else:
-                status = "completed" if self.integrity.verify_revision(path).valid else "damaged"
+                try:
+                    if not path.is_dir() or path.is_symlink():
+                        status = "missing"
+                    else:
+                        status = "completed" if self.integrity.verify_revision(path).valid else "damaged"
+                except OSError:
+                    status = "unavailable"
+                    self._scan_unavailable = True
+                    self.status_label.setText(self.catalogs.text("history.scan_unavailable"))
             records.append(HistoryRecord(path, batch_id, revision, status))
-        for incomplete in self.recovery.find_incomplete(self._destination):
+        for incomplete in incomplete_records:
             records = [record for record in records if record.path != incomplete.path]
+            status = "unavailable" if root_unavailable or incomplete.path in unavailable_paths else "incomplete"
             records.append(HistoryRecord(
-                incomplete.path, incomplete.batch_id, None, "incomplete", incomplete,
+                incomplete.path, incomplete.batch_id, None, status, incomplete,
             ))
         self.records = tuple(sorted(records, key=lambda record: (record.path.name.casefold(), record.status)))
         self._render_rows()
@@ -142,8 +176,12 @@ class HistoryPage(QWidget):
         self.retranslate()
 
     def _act(self, record: HistoryRecord, action: str) -> None:
-        if action == "open_folder" and record.path.is_dir():
-            self.open_path_requested.emit(record.path)
+        if action == "open_folder" and record.status != "unavailable":
+            try:
+                if record.path.is_dir():
+                    self.open_path_requested.emit(record.path)
+            except OSError:
+                self.status_label.setText(self.catalogs.text("history.scan_unavailable"))
         elif action == "verify":
             report = self.integrity.verify_revision(record.path)
             self.status_label.setText(
@@ -160,7 +198,7 @@ class HistoryPage(QWidget):
                 self.open_path_requested.emit(path)
         elif action == "correct" and record.status == "completed":
             self.correction_requested.emit(record.path)
-        elif action == "remove" and record.incomplete is not None and not record.incomplete.publication_interrupted:
+        elif action == "remove" and record.status == "incomplete" and record.incomplete is not None and not record.incomplete.publication_interrupted:
             answer = QMessageBox.question(
                 self, self.catalogs.text("history.remove_title"),
                 self.catalogs.text("history.remove_confirm", path=str(record.path)),
@@ -180,6 +218,8 @@ class HistoryPage(QWidget):
         self.explanation.setText(self.catalogs.text("history.center_explanation"))
         self.back_button.setText(self.catalogs.text("action.back"))
         self.back_button.setAccessibleName(self.back_button.text())
+        if self._scan_unavailable:
+            self.status_label.setText(self.catalogs.text("history.scan_unavailable"))
         for record, (label, buttons) in zip(self.records, self._rows, strict=True):
             label.setText(self.catalogs.text(
                 "history.record_label", name=record.path.name,
@@ -189,7 +229,10 @@ class HistoryPage(QWidget):
                 control = buttons[action]
                 control.setText(self.catalogs.text(key))
                 control.setAccessibleName(f"{control.text()}: {record.path.name}")
-            available = record.path.is_dir() and not record.path.is_symlink()
+            try:
+                available = record.status != "unavailable" and record.path.is_dir() and not record.path.is_symlink()
+            except OSError:
+                available = False
             buttons["open_folder"].setEnabled(available)
             buttons["verify"].setEnabled(available and record.incomplete is None)
             buttons["open_audit"].setEnabled(record.status == "completed" and
@@ -198,5 +241,5 @@ class HistoryPage(QWidget):
                                                    self.integrity.verified_artifact(record.path, "combined") is not None)
             buttons["correct"].setEnabled(record.status == "completed")
             buttons["remove"].setEnabled(
-                record.incomplete is not None and not record.incomplete.publication_interrupted
+                record.status == "incomplete" and record.incomplete is not None and not record.incomplete.publication_interrupted
             )

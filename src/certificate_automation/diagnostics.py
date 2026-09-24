@@ -51,26 +51,46 @@ def _trace_shape(text: str | None) -> list[dict[str, object]]:
 
 def _manifest_facts(manifest: Mapping[str, object]) -> dict[str, object]:
     facts: dict[str, object] = {}
-    for key in ("schema_version", "revision", "status", "export_status"):
+    for key in ("schema_version", "revision"):
         value = manifest.get(key)
-        if isinstance(value, (int, bool)) or value in ("published", "verified", "not_exported"):
+        if type(value) is int and value >= 0:
+            facts[key] = value
+    for key, allowed in (
+        ("status", {"published", "verified"}),
+        ("export_status", {"not_exported", "exported", "ready_to_print"}),
+    ):
+        value = manifest.get(key)
+        if isinstance(value, str) and value in allowed:
             facts[key] = value
     counts = manifest.get("counts")
     if isinstance(counts, Mapping):
-        facts["counts"] = {key: value for key, value in counts.items()
-                           if isinstance(key, str) and type(value) is int and value >= 0}
+        facts["counts"] = {
+            key: counts[key] for key in ("recipients", "docx", "pdf", "combined_pdf", "warnings")
+            if type(counts.get(key)) is int and counts[key] >= 0
+        }
     hashes: list[str] = []
-    def visit(value: object) -> None:
-        if isinstance(value, Mapping):
-            for key, item in value.items():
-                if isinstance(key, str) and key.endswith("sha256") and isinstance(item, str) and re.fullmatch(r"[0-9a-fA-F]{64}", item):
-                    hashes.append(item.lower())
-                elif isinstance(item, (Mapping, list)):
-                    visit(item)
-        elif isinstance(value, list):
-            for item in value:
-                visit(item)
-    visit(manifest)
+
+    def append_hash(record: object, key: str) -> None:
+        if not isinstance(record, Mapping):
+            return
+        value = record.get(key)
+        if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value):
+            hashes.append(value.lower())
+
+    sources = manifest.get("sources")
+    if isinstance(sources, Mapping):
+        for kind in ("data", "template", "workbook"):
+            append_hash(sources.get(kind), "sha256")
+    append_hash(manifest.get("dataset"), "sha256")
+    for collection, keys in (
+        (manifest.get("outputs"), ("docx_sha256", "pdf_sha256")),
+        (manifest.get("artifacts"), ("sha256",)),
+    ):
+        if isinstance(collection, list):
+            for record in collection:
+                for key in keys:
+                    append_hash(record, key)
+    append_hash(manifest.get("combined_pdf"), "sha256")
     facts["sha256"] = hashes
     return facts
 

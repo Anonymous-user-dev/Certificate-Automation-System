@@ -118,3 +118,29 @@ def test_default_bundle_ignores_malformed_nested_journal_values(tmp_path):
 
     assert "Ana García" not in payload
     assert json.loads(payload)["crash_journal"] == {"schema_version": 1}
+
+
+def test_manifest_counts_and_hashes_reject_dynamic_private_keys(tmp_path):
+    private = str(tmp_path / "Ana García" / "recipients.xlsx")
+    context = DiagnosticContext(manifest={
+        "schema_version": 3,
+        "counts": {
+            "recipients": 2, "combined_pdf": 1,
+            "Ana García": 7, private: 8, "row\nprivate": 9,
+            "pdf": True, "docx": -1,
+        },
+        "sources": {"template": {"sha256": "a" * 64}},
+        "unknown": {"private_sha256": "f" * 64, "Ana García": {"sha256": "e" * 64}},
+    })
+
+    output = DiagnosticBundleService().create(context, tmp_path / "support.zip")
+    with ZipFile(output) as archive:
+        raw = archive.read("diagnostic.json").decode("utf-8")
+    facts = json.loads(raw)["manifest_facts"]
+
+    assert facts["counts"] == {"recipients": 2, "combined_pdf": 1}
+    assert facts["sha256"] == ["a" * 64]
+    assert "Ana García" not in raw
+    assert private not in raw
+    assert "row\\nprivate" not in raw
+    assert "f" * 64 not in raw and "e" * 64 not in raw

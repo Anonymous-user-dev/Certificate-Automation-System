@@ -75,7 +75,11 @@ def read_publish_intents(destination: Path) -> tuple[PublishIntent, ...]:
             ):
                 continue
             records.append(PublishIntent(batch_id, path, final_name, digest, revision))
-        except (OSError, KeyError, ValueError, TypeError):
+        except OSError:
+            # An app-owned intent may still reserve or interrupt publication.
+            # A transient access failure must not make it disappear from recovery.
+            raise
+        except (KeyError, ValueError, TypeError):
             continue
     return tuple(records)
 
