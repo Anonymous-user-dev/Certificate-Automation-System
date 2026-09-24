@@ -130,8 +130,16 @@ class IntegrityService:
                     add(combined.get("filename"), combined.get("sha256"),
                         combined.get("size"), combined.get("page_count"))
                     individual_pages = [item.get("pdf_pages") for item in outputs]
+                    separator_positions = combined.get("separator_positions", [])
+                    if (
+                        not isinstance(separator_positions, list)
+                        or any(type(position) is not int or position < 1 for position in separator_positions)
+                        or separator_positions != sorted(set(separator_positions))
+                    ):
+                        issues.append("integrity.combined_pages_mismatch")
+                        separator_positions = []
                     if all(isinstance(count, int) for count in individual_pages) and (
-                        sum(individual_pages) != combined.get("page_count")
+                        sum(individual_pages) + len(separator_positions) != combined.get("page_count")
                     ):
                         issues.append("integrity.combined_pages_mismatch")
                     fingerprints = combined.get("page_fingerprints")

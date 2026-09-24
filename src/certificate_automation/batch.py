@@ -41,6 +41,7 @@ from certificate_automation.pdf_merge import (
     CombinedPdfRecord,
     merge_verified_pdfs,
 )
+from certificate_automation.print_readiness import PrintReadinessService
 from certificate_automation.template import TemplateInspection, render_template
 from certificate_automation.validation import validate_preflight
 from certificate_automation.verification import (
@@ -453,11 +454,15 @@ class BatchGenerator:
             or frozen.template_sha256 != report.template_sha256
             or frozen.payload()["mapping"] != plan.to_json()
             or frozen.payload()["outputs"] != outputs.to_json()
+            or frozen.payload()["print_settings"] != (
+                outputs.print_settings.to_json() if outputs.print_settings is not None else {}
+            )
             or frozen.warning_codes != warnings
             or frozen.warning_ack_digest != (report.warning_digest or None)
             or frozen.locale != request.locale
             or frozen.recipient_count != len(outputs.row_ids)
             or frozen.destination != str(outputs.destination.resolve())
+            or frozen.output_counts.get("separator", 0) != outputs.separator_count
         ):
             raise BatchGenerationError(
                 "The generation request differs from the frozen approval.",
@@ -600,11 +605,16 @@ class BatchGenerator:
                     )
 
             if outputs.combined_pdf:
+                merge_args = (
+                    {"separator_every": outputs.print_settings.separator_every}
+                    if outputs.print_settings is not None and outputs.print_settings.separator_every is not None
+                    else {}
+                )
                 combined = merge_verified_pdfs(
                     tuple(pdf_by_row[row_id] for row_id in outputs.row_ids),
-                    staging / f"{outputs.batch_name}.pdf",
+                    staging / f"{outputs.batch_name}.pdf", **merge_args,
                 )
-                expected_pages = sum(page_counts.values())
+                expected_pages = sum(page_counts.values()) + outputs.separator_count
                 try:
                     verify_pdf_page_count(combined.path, expected_pages)
                 except ArtifactVerificationError as error:
@@ -616,6 +626,11 @@ class BatchGenerator:
                     raise BatchGenerationError(
                         "The combined PDF page count did not match its verified inputs.",
                         code="output.combined_pdf_verification_failed",
+                    )
+                if outputs.print_settings is not None and request.approval_input.expected_pages != expected_pages:
+                    raise BatchGenerationError(
+                        "The combined page count differs from the approved print summary.",
+                        code="print.page_count_mismatch",
                     )
                 self._emit(
                     progress,
@@ -642,6 +657,16 @@ class BatchGenerator:
                 )
                 for row_id in outputs.row_ids
             )
+            if combined is not None:
+                actual_fingerprints = pdf_page_fingerprints(combined.path)
+                source_fingerprints = iter(
+                    fingerprint
+                    for row_id in outputs.row_ids
+                    for fingerprint in pdf_page_fingerprints(pdf_by_row[row_id])
+                )
+                separator_fingerprints = iter(
+                    actual_fingerprints[position - 1] for position in combined.separator_positions
+                )
             combined_audit = (
                 CombinedAuditOutput(
                     combined.path,
@@ -649,10 +674,13 @@ class BatchGenerator:
                     sha256_file(combined.path),
                     outputs.row_ids,
                     tuple(
-                        fingerprint
-                        for row_id in outputs.row_ids
-                        for fingerprint in pdf_page_fingerprints(pdf_by_row[row_id])
+                        next(separator_fingerprints)
+                        if position in combined.separator_positions
+                        else next(source_fingerprints)
+                        for position in range(1, combined.page_count + 1)
                     ),
+                    combined.separator_positions,
+                    tuple(page_counts[row_id] for row_id in outputs.row_ids),
                 )
                 if combined is not None
                 else None
@@ -663,6 +691,7 @@ class BatchGenerator:
                 "individual_pdf": outputs.individual_pdf,
                 "combined_pdf": outputs.combined_pdf,
                 "batch_name": outputs.batch_name,
+                "print_settings": outputs.print_settings.to_json() if outputs.print_settings is not None else None,
             }
             audit_context = AuditContext(
                 batch_id=batch_id,
@@ -692,6 +721,7 @@ class BatchGenerator:
                 journal_id=batch_id,
                 platform_report=platform.to_json(),
                 workflow=request.approval.to_json(),
+                page_geometry=outputs.print_settings.to_json() if outputs.print_settings is not None else None,
                 lineage=request.lineage,
             )
             write_summary(
@@ -724,7 +754,7 @@ class BatchGenerator:
                 selected_artifacts,
                 expected_hashes,
                 combined,
-                sum(page_counts.values()),
+                sum(page_counts.values()) + outputs.separator_count,
             )
             self._emit(
                 progress,
@@ -748,6 +778,15 @@ class BatchGenerator:
                     "The staged revision failed its integrity check.",
                     code="integrity.staging_failed",
                 )
+            if outputs.combined_pdf and outputs.print_settings is not None:
+                readiness = PrintReadinessService().verify(
+                    staging, outputs.print_settings, allow_ready=True,
+                )
+                if not readiness.ready:
+                    raise BatchGenerationError(
+                        "The published PDFs would not match the approved print settings.",
+                        code="print.not_ready",
+                    )
             if final_directory.exists():
                 raise BatchGenerationError(
                     "The final batch folder appeared during generation and was not overwritten.",

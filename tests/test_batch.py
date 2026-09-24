@@ -299,6 +299,65 @@ def test_typed_generation_rejects_request_changed_after_approval(tmp_path, docx_
     assert caught.value.code == "approval.stale"
 
 
+@pytest.mark.parametrize("keep_individual_pdfs", (False, True))
+def test_typed_generation_records_separator_positions_and_print_settings(tmp_path, docx_factory, keep_individual_pdfs):
+    from dataclasses import replace
+    from decimal import Decimal
+    from certificate_automation.print_readiness import PrintReadinessService, PrintSettings
+    from pypdf import PdfReader
+
+    basic = _typed_request(tmp_path, docx_factory, individual_pdf=keep_individual_pdfs)
+    settings = PrintSettings(Decimal("612"), Decimal("792"), "portrait", 1)
+    outputs = replace(basic.outputs, print_settings=settings)
+    frozen = replace(
+        basic.approval_input, outputs=outputs.to_json(), print_settings=settings.to_json(),
+        output_counts={"docx": 0, "pdf": 2 if keep_individual_pdfs else 0,
+                       "combined": 1, "separator": 1},
+        expected_pages=3,
+    )
+    approval = ApprovalService.freeze(frozen, "Preparer")
+    request = replace(basic, outputs=outputs, approval_input=frozen, approval=approval,
+                      approval_digest=approval.snapshot.digest)
+
+    result = _generator(FakeConverter()).generate(request)
+    manifest = json.loads((result.output_dir / "manifest.json").read_text("utf-8"))
+
+    assert manifest["combined_pdf"]["separator_positions"] == [2]
+    assert manifest["combined_pdf"]["source_page_counts"] == [1, 1]
+    assert len(PdfReader(result.combined_pdf_path).pages) == 3
+    assert len(list(result.output_dir.glob("*.pdf"))) == (3 if keep_individual_pdfs else 1)
+    assert PrintReadinessService().verify(result.output_dir).ready
+
+
+def test_typed_generation_blocks_publication_when_pdf_differs_from_approved_page_size(tmp_path, docx_factory):
+    from dataclasses import replace
+    from decimal import Decimal
+    from certificate_automation.print_readiness import PrintSettings
+
+    class WrongSizeConverter(FakeConverter):
+        def convert(self, docx_path, pdf_path, on_attempt=None):
+            writer = PdfWriter()
+            writer.add_blank_page(width=600, height=792)
+            with pdf_path.open("wb") as output:
+                writer.write(output)
+            writer.close()
+
+    basic = _typed_request(tmp_path, docx_factory, individual_pdf=True)
+    settings = PrintSettings(Decimal("612"), Decimal("792"), "portrait")
+    outputs = replace(basic.outputs, print_settings=settings)
+    frozen = replace(basic.approval_input, outputs=outputs.to_json(),
+                     print_settings=settings.to_json())
+    approval = ApprovalService.freeze(frozen, "Preparer")
+    request = replace(basic, outputs=outputs, approval_input=frozen, approval=approval,
+                      approval_digest=approval.snapshot.digest)
+
+    with pytest.raises(BatchGenerationError) as caught:
+        _generator(WrongSizeConverter()).generate(request)
+
+    assert caught.value.code == "print.not_ready"
+    assert not list(outputs.destination.glob("Awards-revision-*"))
+
+
 def test_typed_generation_rejects_changed_source_file_before_staging(tmp_path, docx_factory):
     request = _typed_request(tmp_path, docx_factory)
     source = tmp_path / "recipients.csv"

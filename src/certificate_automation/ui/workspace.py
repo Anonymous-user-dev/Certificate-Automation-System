@@ -46,6 +46,7 @@ from certificate_automation.platform_report import PlatformReport
 from certificate_automation import __version__
 from certificate_automation.profiles import MappingProfile, ProfileError, ProfileStore, compare_profile
 from certificate_automation.output_options import OutputOptions
+from certificate_automation.print_readiness import ExportError, ExportService, PrintReadinessService
 from certificate_automation.project import ProjectCoordinator, ProjectError, ProjectSaveError, ProjectState, ProjectStore
 from certificate_automation.project_catalog import ProjectCatalog
 from certificate_automation.project_migration import ProjectMigrationService
@@ -301,6 +302,11 @@ class WorkspaceWindow(QMainWindow):
             control.toggled.connect(self._output_settings_changed)
         for control in (self.output_page.destination, self.output_page.batch_name):
             control.textChanged.connect(self._output_settings_changed)
+        for control in (self.output_page.print_width, self.output_page.print_height,
+                        self.output_page.separator_every):
+            control.valueChanged.connect(self._output_settings_changed)
+        self.output_page.print_orientation.currentIndexChanged.connect(self._output_settings_changed)
+        self.output_page.separator_enabled.toggled.connect(self._output_settings_changed)
         self.template_health_page.expected_pages.valueChanged.connect(self._layout_settings_changed)
         self.approval_page.freeze_requested.connect(self._freeze_approval)
         self.approval_page.two_person_mode_changed.connect(self._approval_mode_changed)
@@ -311,6 +317,7 @@ class WorkspaceWindow(QMainWindow):
         self.results_page.cancel_requested.connect(self._request_cancel)
         self.results_page.open_output_requested.connect(self._open_published_output)
         self.results_page.open_combined_requested.connect(self._open_combined_output)
+        self.results_page.export_requested.connect(self._export_published)
         self.results_page.open_summary_requested.connect(
             lambda: self._open_result_file("batch_summary.html")
         )
@@ -505,8 +512,15 @@ class WorkspaceWindow(QMainWindow):
             self.template_health_page.set_structure(
                 self.template_health_service.inspect_structure(restored.template.path)
             )
+            structure = self.template_health_page._structure
+            self.output_page.set_template_geometry(
+                structure.section_geometries[0] if structure and structure.section_geometries else None
+            )
             if project.layout_review and project.layout_review.get("expected_pages"):
                 self.template_health_page.expected_pages.setValue(
+                    int(project.layout_review["expected_pages"])
+                )
+                self.output_page.set_expected_pages_per_certificate(
                     int(project.layout_review["expected_pages"])
                 )
         self.match_page.set_context(
@@ -732,6 +746,9 @@ class WorkspaceWindow(QMainWindow):
             self.output_page.docx, self.output_page.individual_pdf,
             self.output_page.combined_pdf, self.output_page.destination,
             self.output_page.browse_button, self.output_page.batch_name,
+            self.output_page.print_width, self.output_page.print_height,
+            self.output_page.print_orientation, self.output_page.separator_enabled,
+            self.output_page.separator_every,
             self.output_page.continue_button,
         )
         for control in (*data_controls, *template_controls, *health_controls, *review_controls, *output_controls):
@@ -814,6 +831,12 @@ class WorkspaceWindow(QMainWindow):
             template_sha256=template.sha256 if template is not None else self._loaded_project.template_sha256,
             mapping_plan=current.plan.to_json() if current.plan is not None else None,
             output_options=current.outputs.to_json() if current.outputs is not None else None,
+            print_settings=(
+                current.outputs.print_settings.to_json()
+                if current.outputs is not None and current.outputs.print_settings is not None
+                else None if current.outputs is not None
+                else self._loaded_project.print_settings
+            ),
             layout_review=(
                 self._loaded_project.layout_review
                 if self._loaded_project.layout_review
@@ -1566,6 +1589,15 @@ class WorkspaceWindow(QMainWindow):
             return
         self.banner.clear()
         self.output_page.set_order(self.project_state.dataset.order)
+        structure = self.template_health_page._structure
+        if self.project_state.outputs is None:
+            self.output_page.set_template_geometry(
+                structure.section_geometries[0] if structure and structure.section_geometries else None
+            )
+        layout = self._loaded_project.layout_review if self._loaded_project is not None else None
+        self.output_page.set_expected_pages_per_certificate(
+            int(layout.get("expected_pages", 1)) if layout else 1
+        )
         self.output_page.continue_button.setEnabled(True)
         availability = getattr(self.services, "word_availability", None)
         if callable(availability):
@@ -1578,6 +1610,11 @@ class WorkspaceWindow(QMainWindow):
             return
         self._invalidate_approval()
         self.project_state = replace(self.project_state, outputs=outputs)
+        if self._loaded_project is not None:
+            self._loaded_project = replace(
+                self._loaded_project,
+                print_settings=outputs.print_settings.to_json() if outputs.print_settings is not None else None,
+            )
         self.results_page.set_expected_combined(outputs.combined_pdf)
         self.results_page.generate_button.setEnabled(False)
         self.state = replace(self.state, project_revision=self.state.project_revision + 1)
@@ -1671,10 +1708,13 @@ class WorkspaceWindow(QMainWindow):
         self._mark_project_dirty()
 
     def _output_settings_changed(self, *_args) -> None:
-        if self._approval is None or self._restoring_mapping or self._hydrating_project:
+        if self._read_only or self._restoring_mapping or self._hydrating_project:
+            return
+        if self._approval is None and self.project_state.outputs is None:
             return
         self._invalidate_approval()
         self.project_state = replace(self.project_state, outputs=None)
+        self.results_page.set_ready()
         self.state = replace(
             self.state,
             completed_steps=tuple(step for step in self.state.completed_steps
@@ -1682,7 +1722,7 @@ class WorkspaceWindow(QMainWindow):
             project_revision=self.state.project_revision + 1,
         )
         if self._loaded_project is not None:
-            self._loaded_project = replace(self._loaded_project, output_options=None)
+            self._loaded_project = replace(self._loaded_project, output_options=None, print_settings=None)
         self._mark_project_dirty()
 
     def _layout_settings_changed(self, *_args) -> None:
@@ -1748,7 +1788,7 @@ class WorkspaceWindow(QMainWindow):
             warning_codes=warnings,
             warning_ack_digest=report.warning_digest or None,
             outputs=outputs.to_json(),
-            print_settings=dict(project.print_settings or {}),
+            print_settings=outputs.print_settings.to_json() if outputs.print_settings is not None else {},
             word_available=word_available,
             converter_identity=converter_identity,
             locale=self.catalogs.locale,
@@ -1758,11 +1798,12 @@ class WorkspaceWindow(QMainWindow):
                 "docx": selected if outputs.docx else 0,
                 "pdf": selected if outputs.individual_pdf else 0,
                 "combined": 1 if outputs.combined_pdf else 0,
-                "separator": 0,
+                "separator": outputs.separator_count,
                 "manifest": 1,
                 "report": 1,
             },
-            expected_pages=(selected * per_certificate_pages if outputs.combined_pdf else 0),
+            expected_pages=(selected * per_certificate_pages + outputs.separator_count
+                            if outputs.combined_pdf else 0),
             destination=str(outputs.destination.resolve()),
             proposed_revision_folder=self.catalogs.text("approval.revision_pending"),
             template_name=template.path.name,
@@ -2012,7 +2053,12 @@ class WorkspaceWindow(QMainWindow):
         self.results_page.set_expected_combined(
             bool(outputs and outputs.combined_pdf)
         )
-        self.results_page.set_published(result)
+        readiness = (
+            PrintReadinessService().verify(result.output_dir)
+            if result.state is BatchState.PUBLISHED and result.output_dir is not None
+            and outputs is not None and outputs.combined_pdf else None
+        )
+        self.results_page.set_published(result, readiness=readiness)
 
     def _generation_failed(self, error) -> None:
         self.results_page.set_failed(error)
@@ -2044,8 +2090,15 @@ class WorkspaceWindow(QMainWindow):
     def _open_combined_output(self) -> None:
         result = self.results_page.result if self.results_page.state == "published" else None
         opener = getattr(self.services, "open_path", None)
-        path = result.combined_pdf_path if result else None
+        if result is None or result.output_dir is None:
+            return
+        readiness = PrintReadinessService().verify(result.output_dir)
+        self.results_page.set_readiness(readiness)
+        if not readiness.ready:
+            return
+        path = IntegrityService().verified_artifact(result.output_dir, "combined") if result and result.output_dir else None
         if not (result and result.output_dir and path and callable(opener)):
+            self.results_page.show_open_error()
             return
         try:
             is_published_artifact = path.resolve().parent == result.output_dir.resolve()
@@ -2053,6 +2106,22 @@ class WorkspaceWindow(QMainWindow):
             is_published_artifact = False
         if not is_published_artifact or not path.is_file() or not opener(path):
             self.results_page.show_open_error()
+
+    def _export_published(self) -> None:
+        result = self.results_page.result if self.results_page.state == "published" else None
+        if result is None or result.output_dir is None:
+            return
+        selected = QFileDialog.getExistingDirectory(
+            self, self.catalogs.text("results.export"), str(result.output_dir.parent)
+        )
+        if not selected:
+            return
+        try:
+            exported = ExportService().export_revision(result.output_dir, Path(selected))
+        except ExportError as error:
+            self.results_page.show_export_error(error.code)
+            return
+        self.results_page.show_export_result(exported.exported_copy)
 
     def closeEvent(self, event) -> None:
         if self._thread is not None:

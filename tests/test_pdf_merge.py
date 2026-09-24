@@ -27,6 +27,29 @@ def test_merge_preserves_selected_order_and_total_pages(tmp_path):
     assert len(record.sha256) == 64
 
 
+def test_separator_page_preserves_recipient_pages_and_order(tmp_path):
+    first = _pdf(tmp_path / "first.pdf", (611,))
+    second = _pdf(tmp_path / "second.pdf", (612,))
+    third = _pdf(tmp_path / "third.pdf", (613,))
+
+    record = merge_verified_pdfs((first, second, third), tmp_path / "batch.pdf", separator_every=2)
+
+    pages = PdfReader(record.path).pages
+    assert record.source_order == (first, second, third)
+    assert record.separator_positions == (3,)
+    assert record.page_count == 4
+    assert [float(page.mediabox.width) for page in pages] == [611, 612, 612, 613]
+
+
+@pytest.mark.parametrize("interval", [0, -1, True])
+def test_separator_interval_must_be_positive_integer(tmp_path, interval):
+    source = _pdf(tmp_path / "one.pdf", (612,))
+    with pytest.raises(CombinedPdfError) as caught:
+        merge_verified_pdfs((source,), tmp_path / "batch.pdf", separator_every=interval)
+    assert caught.value.code == "output.separator_interval_invalid"
+    assert not (tmp_path / "batch.pdf").exists()
+
+
 def test_merge_rejects_empty_input_without_creating_output(tmp_path):
     destination = tmp_path / "batch.pdf"
 

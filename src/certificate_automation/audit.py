@@ -34,6 +34,8 @@ class CombinedAuditOutput:
     sha256: str
     source_order: tuple[str, ...]
     page_fingerprints: tuple[str, ...] = ()
+    separator_positions: tuple[int, ...] = ()
+    source_page_counts: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +237,8 @@ def _write_manifest_v2(context: AuditContext, destination: Path) -> Path:
             combined["size"] = context.combined_pdf.path.stat().st_size
             combined["page_fingerprints"] = list(context.combined_pdf.page_fingerprints)
             combined["page_geometry"] = pdf_page_geometry(context.combined_pdf.path)
+            combined["separator_positions"] = list(context.combined_pdf.separator_positions)
+            combined["source_page_counts"] = list(context.combined_pdf.source_page_counts)
         artifacts = []
         for name in ("batch_summary.html", "support.log"):
             path = Path(destination).parent / name

@@ -10,7 +10,7 @@ from threading import Event
 from pypdf import PdfWriter
 
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtWidgets import QAbstractButton, QAbstractItemView, QComboBox, QLineEdit, QMessageBox, QTableView
+from PySide6.QtWidgets import QAbstractButton, QAbstractItemView, QComboBox, QFileDialog, QLineEdit, QMessageBox, QTableView
 import pytest
 
 from certificate_automation.i18n import CatalogSet, package_root
@@ -18,6 +18,9 @@ from certificate_automation.approval import ApprovalService
 from certificate_automation.dataset import Column, DataRow, TabularDataset
 from certificate_automation.domain import BatchResult, BatchState
 from certificate_automation.output_options import OutputOptions
+from certificate_automation.print_readiness import PrintReadinessReport, PrintReadinessService, PrintSettings
+from certificate_automation.template_health import PageGeometry
+from decimal import Decimal
 from certificate_automation.mapping import ColumnValue, FixedValue, JoinValue, MappingPlan
 from certificate_automation.profiles import MappingProfile, ProfileStore
 from certificate_automation.ui.workspace import WorkspaceWindow
@@ -359,6 +362,138 @@ def test_editing_output_controls_immediately_clears_frozen_approval(workspace, t
     assert workspace.project_state.outputs is None
     assert workspace._loaded_project.approval is None
     assert not workspace.approval_page.generate_button.isEnabled()
+
+
+def test_output_page_inherits_template_geometry_and_forecasts_separator_pages(workspace, tmp_path):
+    page = workspace.output_page
+    assert not page.separator_enabled.isEnabled()
+    page.set_order(("row-1", "row-2", "row-3"))
+    page.set_template_geometry(PageGeometry(612, 792, "portrait"))
+    page.set_expected_pages_per_certificate(2)
+    page.combined_pdf.setChecked(True)
+    page.separator_enabled.setChecked(True)
+    page.separator_every.setValue(2)
+    page.destination.setText(str(tmp_path))
+
+    choices = page.options()
+
+    assert choices.print_settings == PrintSettings(Decimal("612"), Decimal("792"), "portrait", 2)
+    assert choices.separator_count == 1
+    assert "7" in page.page_forecast.text()
+    assert page.printing_note.text()
+    assert page.print_width_label.text() == workspace.catalogs.text("output.page_width")
+    assert page.print_height_label.text() == workspace.catalogs.text("output.page_height")
+    assert page.separator_every_label.text() == workspace.catalogs.text("output.separator_every")
+
+
+def test_changing_print_settings_invalidates_frozen_approval(workspace, tmp_path, docx_factory):
+    _ready_approval_workspace(workspace, tmp_path, docx_factory)
+    workspace.approval_page.preparer_name.setText("Alice")
+    workspace.approval_page.freeze_button.click()
+    workspace.navigate("output")
+    assert workspace._approval is not None
+
+    workspace.output_page.print_width.setValue(613)
+
+    assert workspace._approval is None
+    assert workspace.project_state.outputs is None
+    assert workspace._loaded_project.approval is None
+
+
+def test_editing_accepted_print_choices_requires_accepting_them_again(workspace, tmp_path):
+    workspace.new_project(tmp_path / "Print.certproject")
+    dataset = workspace.project_state.dataset
+    settings = PrintSettings(Decimal("612"), Decimal("792"), "portrait")
+    selected = OutputOptions(True, True, True, tmp_path, "Awards", dataset.order, settings)
+    workspace._accept_outputs(selected)
+    workspace.navigate("output")
+
+    workspace.output_page.print_width.setValue(613)
+
+    assert workspace.project_state.outputs is None
+    assert "output" not in workspace.state.completed_steps
+
+
+def test_results_claim_print_ready_only_with_fresh_report(workspace, tmp_path):
+    output = tmp_path / "Awards-revision-1"
+    output.mkdir()
+    combined = output / "Awards.pdf"
+    combined.write_bytes(b"pdf")
+    result = BatchResult(BatchState.PUBLISHED, output, 1, combined_pdf_path=combined)
+
+    workspace.results_page.set_published(result)
+    assert workspace.catalogs.text("results.print_ready") not in workspace.results_page.status_label.text()
+
+    workspace.results_page.set_published(
+        result, readiness=PrintReadinessReport(True, 1, 1, 1, ())
+    )
+    assert workspace.catalogs.text("results.print_ready") in workspace.results_page.status_label.text()
+
+    workspace.results_page.set_published(
+        result, readiness=PrintReadinessReport(False, 1, 1, 1, ())
+    )
+    assert not workspace.results_page.open_combined_button.isEnabled()
+
+
+def test_combined_open_uses_verified_manifest_file_even_if_result_path_is_wrong(workspace, tmp_path):
+    from test_print_readiness import _revision
+    output = _revision(tmp_path)
+    wrong = output / "wrong.pdf"
+    opened = []
+    workspace.services.open_path = lambda path: opened.append(path) or True
+    workspace.results_page.set_published(
+        BatchResult(BatchState.PUBLISHED, output, 3, combined_pdf_path=wrong)
+    )
+
+    workspace._open_combined_output()
+
+    assert opened == [output / "Awards.pdf"]
+
+
+def test_combined_open_rechecks_published_files_and_removes_stale_ready_claim(workspace, tmp_path):
+    from test_print_readiness import _revision
+    output = _revision(tmp_path)
+    opened = []
+    workspace.services.open_path = lambda path: opened.append(path) or True
+    workspace.results_page.set_expected_combined(True)
+    workspace.results_page.set_published(
+        BatchResult(BatchState.PUBLISHED, output, 3, combined_pdf_path=output / "Awards.pdf"),
+        readiness=PrintReadinessService().verify(output),
+    )
+    assert workspace.catalogs.text("results.print_ready") in workspace.results_page.status_label.text()
+    (output / "Awards.pdf").write_bytes(b"changed after verification")
+
+    workspace._open_combined_output()
+
+    assert opened == []
+    assert not workspace.results_page.open_combined_button.isEnabled()
+    assert workspace.catalogs.text("results.print_ready") not in workspace.results_page.status_label.text()
+
+
+def test_results_export_button_makes_a_verified_copy(workspace, tmp_path, monkeypatch):
+    from test_print_readiness import _revision
+    output = _revision(tmp_path)
+    destination = tmp_path / "removable"
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: str(destination))
+    workspace.results_page.set_published(
+        BatchResult(BatchState.PUBLISHED, output, 3, combined_pdf_path=output / "Awards.pdf")
+    )
+
+    workspace.results_page.export_button.click()
+
+    assert (destination / output.name / "manifest.json").is_file()
+    assert "official original" in workspace.results_page.status_label.text()
+    assert (output / "manifest.json").is_file()
+
+
+@pytest.mark.parametrize("locale", ("ru", "zh_CN"))
+def test_print_controls_are_translated_and_accessible(workspace, locale):
+    workspace.set_locale(locale)
+    page = workspace.output_page
+    assert page.printing_note.text() == workspace.catalogs.text("output.printing_note")
+    assert page.separator_enabled.text() == workspace.catalogs.text("output.separator_enabled")
+    assert page.print_width.accessibleName() == workspace.catalogs.text("output.page_width")
+    assert page.separator_every.accessibleName() == workspace.catalogs.text("output.separator_every")
 
 
 def test_changed_import_source_blocks_approved_generation(workspace, tmp_path, docx_factory):
@@ -1325,9 +1460,8 @@ def test_combined_open_failure_is_visible_and_other_result_actions_remain_availa
 
     qtbot.mouseClick(workspace.results_page.open_combined_button, Qt.MouseButton.LeftButton)
 
-    assert workspace.results_page.status_label.text() == workspace.catalogs.text(
-        "results.open_combined_failed"
-    )
+    assert workspace.catalogs.text("results.print_check_failed") in workspace.results_page.status_label.text()
+    assert not workspace.results_page.open_combined_button.isEnabled()
     assert workspace.results_page.open_output_button.isEnabled()
 
 

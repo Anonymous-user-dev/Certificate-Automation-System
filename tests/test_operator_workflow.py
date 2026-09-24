@@ -152,7 +152,7 @@ def test_operator_combined_only_creates_ordered_pdf_and_opens_published_file(
         def convert(self, docx_path, pdf_path, on_attempt=None):
             certificate_text = "\n".join(p.text for p in Document(docx_path).paragraphs)
             assert "Chen Wei" in certificate_text or "Li Ming" in certificate_text
-            width = 613 if "Chen Wei" in certificate_text else 614
+            width = 611 if "Chen Wei" in certificate_text else 613
             writer = PdfWriter()
             writer.add_blank_page(width=width, height=792)
             with pdf_path.open("wb") as output:
@@ -197,7 +197,7 @@ def test_operator_combined_only_creates_ordered_pdf_and_opens_published_file(
     assert result.combined_pdf_path == result.output_dir / "Awards.pdf"
     assert [p.name for p in result.output_dir.glob("*.pdf")] == ["Awards.pdf"]
     assert not list(result.output_dir.glob("*.docx"))
-    assert [float(page.mediabox.width) for page in PdfReader(result.combined_pdf_path).pages] == [613, 614]
+    assert [float(page.mediabox.width) for page in PdfReader(result.combined_pdf_path).pages] == [611, 613]
     manifest = json.loads((result.output_dir / "manifest.json").read_text("utf-8"))
     assert manifest["ordered_row_ids"] == ["row-2", "row-1"]
     assert "Awards.pdf" in window.results_page.status_label.text()
@@ -585,7 +585,8 @@ def test_preview_failures_and_published_result_links_stay_inside_verified_paths(
     window._open_result_file("manifest.json")
     window._open_combined_output()
 
-    assert opened == [output, output / "manifest.json", output / "Awards.pdf"]
+    assert opened == [output, output / "manifest.json"]
+    assert window.catalogs.text("results.print_check_failed") in window.results_page.status_label.text()
 
 
 def test_saved_project_and_home_file_actions_restore_local_workflow(

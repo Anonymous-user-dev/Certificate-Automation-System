@@ -17,6 +17,8 @@ from certificate_automation.mapping import (
     MappingSelection,
 )
 from certificate_automation.output_options import OutputOptions, OutputOptionsError
+from certificate_automation.print_readiness import PrintSettings
+from decimal import Decimal
 from certificate_automation.template import Placeholder, TemplateInspection
 from certificate_automation.validation import validate_preflight
 from certificate_automation.workbook import WorkbookData
@@ -50,6 +52,23 @@ def _inputs(tmp_path: Path, *names: str):
         columns={"FULL_NAME": "full_name", "AWARD": "award"}
     )
     return workbook, template, mappings, destination
+
+
+def test_print_settings_round_trip_with_output_choices(tmp_path):
+    settings = PrintSettings(Decimal("612"), Decimal("792"), "portrait", 2)
+    choices = OutputOptions(True, True, True, tmp_path, "Awards", ("row-1", "row-2", "row-3"), settings)
+
+    reopened = OutputOptions.from_json(choices.to_json())
+
+    assert reopened == choices
+    assert reopened.separator_count == 1
+
+
+def test_separator_choice_requires_combined_pdf(tmp_path):
+    settings = PrintSettings(Decimal("612"), Decimal("792"), "portrait", 2)
+    with pytest.raises(OutputOptionsError) as caught:
+        OutputOptions(True, False, False, tmp_path, "Awards", ("row-1",), settings)
+    assert caught.value.code == "output.separator_requires_combined"
 
 
 @pytest.mark.parametrize("name", ["CON", "con.txt", "AUX", "NUL", "COM1", "Lpt9"])
