@@ -1,5 +1,5 @@
 #define AppName "Certificate Automation"
-#define AppVersion "2.1.1"
+#define AppVersion "3.0.0"
 #define AppPublisher "Certificate Automation"
 #define AppExeName "CertificateAutomation.exe"
 #ifndef BuildRoot
@@ -17,6 +17,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+MinVersion=10.0.19045
 OutputDir=..\dist\installer
 OutputBaseFilename=CertificateAutomation-Setup-{#AppVersion}
 Compression=lzma2/max

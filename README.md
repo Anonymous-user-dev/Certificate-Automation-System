@@ -1,6 +1,6 @@
 # Certificate Automation
 
-Certificate Automation 2.1 is a fully offline Windows desktop application for generating official certificate batches from Excel, CSV, TSV, pasted, or manually entered tables and a Word template. It selects editable DOCX plus individual PDFs by default and can optionally create one combined print PDF. Nothing is published unless the complete selected batch verifies successfully.
+Certificate Automation 3.0 is a fully offline Windows desktop application for generating official certificate batches from Excel, CSV, TSV, pasted, or manually entered tables and a Word template. It selects editable DOCX plus individual PDFs by default and can optionally create one combined print PDF. Nothing is published unless the complete selected batch verifies successfully.
 
 ## Product guarantees
 
@@ -32,7 +32,7 @@ Source files are copied into an internal snapshot and are never edited. Draft pr
 
 ## Development setup
 
-Python 3.12 or newer is required. Python 3.13 with PySide6 6.8 is the supported Windows release-build toolchain.
+Python 3.12 or 3.13 is required. CPython 3.12 x64 with PySide6 6.8.3 is the verified Windows release-build toolchain.
 
 ```bash
 python -m venv .venv
@@ -54,7 +54,8 @@ python -m venv .venv-win
 From the repository root in Windows PowerShell:
 
 ```powershell
-.\.venv-win\Scripts\pyinstaller --noconfirm --clean packaging\certificate-automation.spec
+.\.venv-win\Scripts\python -m pip install --require-hashes -r packaging\requirements-build.lock
+.\.venv-win\Scripts\python -m PyInstaller --noconfirm --clean packaging\certificate-automation.spec
 .\.venv-win\Scripts\python -m pytest tests\windows\test_packaged_application.py -v --exe dist\CertificateAutomation\CertificateAutomation.exe
 ```
 
@@ -65,6 +66,21 @@ If Inno Setup 6 is installed:
 ```
 
 The application files appear under `dist/CertificateAutomation/`; the installer appears under `dist/installer/`. Build artifacts are intentionally ignored by Git.
+
+The application manifest declares Windows 10/11 compatibility, x64, per-monitor DPI awareness, UTF-8, long-path support, and ordinary-user (`asInvoker`) execution. The installer is per-user and requires no administrator elevation.
+
+## Verify or sign a release
+
+Every delivered executable and installer must be passed to the verifier. An unsigned build is allowed only when its metadata plainly says `unsigned`; asking for signing fails closed if a certificate, private key, SignTool, signature, or configured thumbprint is missing.
+
+```powershell
+packaging\verify-release.ps1 -Input dist\CertificateAutomation\CertificateAutomation.exe,dist\installer\CertificateAutomation-Setup-3.0.0.exe
+
+# Organization-controlled certificate; no certificate or secret is stored in this repository.
+packaging\sign-release.ps1 -RequireSigning -CertificateThumbprint $env:CERTIFICATE_SIGNING_THUMBPRINT -TimestampUrl $env:CERTIFICATE_TIMESTAMP_URL -Input dist\CertificateAutomation\CertificateAutomation.exe,dist\installer\CertificateAutomation-Setup-3.0.0.exe
+```
+
+Run `scripts\windows-release-acceptance.ps1` separately on clean Windows 10 22H2, Windows 11 24H2, and Windows 11 25H2 x64 machines at 100%, 150%, and 200% display scale. Until evidence for the exact installer SHA-256 exists, `release-metadata.json` records each unavailable row as `machine_verification_pending`; it never treats an untested machine as verified.
 
 ## Project layout
 

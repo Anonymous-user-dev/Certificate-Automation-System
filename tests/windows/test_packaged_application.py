@@ -90,3 +90,17 @@ def test_packaged_application_does_not_bundle_foreign_icu_runtime(request):
     )
 
     assert bundled_icu == ()
+
+
+def test_packaged_executable_contains_windows_compatibility_manifest(request):
+    executable_value = request.config.getoption("--exe")
+    if not executable_value:
+        pytest.skip("pass --exe to test a packaged application")
+    executable = Path(executable_value)
+    assert executable.is_file(), f"Packaged executable was not found: {executable}"
+
+    binary = executable.read_bytes()
+    assert (
+        b"8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a" in binary
+        or "8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a".encode("utf-16le") in binary
+    )

@@ -54,6 +54,7 @@ executable = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch="x86_64",
+    manifest=str(ROOT / "packaging" / "windows-app.manifest"),
     codesign_identity=None,
     entitlements_file=None,
 )
