@@ -45,51 +45,54 @@ def _run_script(script: Path, *arguments: str) -> subprocess.CompletedProcess[st
 
 
 def test_signing_requested_without_certificate_fails_closed(tmp_path):
-    artifact = tmp_path / "fixture.exe"
-    artifact.write_bytes(b"not-signed")
+    application = tmp_path / "CertificateAutomation.exe"
+    installer = tmp_path / "CertificateAutomation-Setup-3.0.0.exe"
+    application.write_bytes(b"not-signed")
+    installer.write_bytes(b"not-signed")
 
     result = _run_script(
         ROOT / "packaging" / "sign-release.ps1",
         "-RequireSigning",
-        "-Input",
-        _native_path(artifact),
+        "-Application", _native_path(application),
+        "-Installer", _native_path(installer),
     )
 
     assert result.returncode != 0
     assert "SIGNING_CERTIFICATE_REQUIRED" in result.stderr
 
 
-def test_verify_release_records_unsigned_artifact_and_pending_machine_matrix(tmp_path):
-    artifact = tmp_path / "fixture.exe"
-    artifact.write_bytes(b"offline-release-fixture")
-    metadata = tmp_path / "release-metadata.json"
+def test_verify_release_requires_exact_application_and_installer_names(tmp_path):
+    application = tmp_path / "wrong.exe"
+    installer = tmp_path / "CertificateAutomation-Setup-3.0.0.exe"
+    application.write_bytes(b"not-an-application")
+    installer.write_bytes(b"not-an-installer")
 
     result = _run_script(
         ROOT / "packaging" / "verify-release.ps1",
-        "-Input",
-        _native_path(artifact),
-        "-OutputMetadata",
-        _native_path(metadata),
+        "-Application",
+        _native_path(application),
+        "-Installer",
+        _native_path(installer),
     )
 
-    assert result.returncode == 0, result.stderr
-    payload = json.loads(metadata.read_text("utf-8-sig"))
-    assert payload["signature_status"] == "unsigned"
-    assert payload["publisher"] is None
-    assert payload["artifacts"][0]["sha256"] == "677dfcc2fd869e58fc683bdabf3b0fb3585813cfd52ed0ea6460c7c05a6363d2"
-    assert {row["state"] for row in payload["windows_matrix"]} == {"machine_verification_pending"}
+    assert result.returncode != 0
+    assert "RELEASE_APPLICATION_NAME_INVALID" in result.stderr
 
 
-def test_verification_requested_as_signed_rejects_unsigned_artifact(tmp_path):
-    artifact = tmp_path / "fixture.exe"
-    artifact.write_bytes(b"not-signed")
+def test_verification_requested_as_signed_requires_expected_thumbprint(tmp_path):
+    application = tmp_path / "CertificateAutomation.exe"
+    installer = tmp_path / "CertificateAutomation-Setup-3.0.0.exe"
+    application.write_bytes(b"not-signed")
+    installer.write_bytes(b"not-signed")
 
     result = _run_script(
         ROOT / "packaging" / "verify-release.ps1",
         "-RequireSigning",
-        "-Input",
-        _native_path(artifact),
+        "-Application",
+        _native_path(application),
+        "-Installer",
+        _native_path(installer),
     )
 
     assert result.returncode != 0
-    assert "SIGNATURE_REQUIRED" in result.stderr
+    assert "SIGNING_EXPECTED_THUMBPRINT_REQUIRED" in result.stderr

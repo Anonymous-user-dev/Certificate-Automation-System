@@ -43,6 +43,10 @@ def test_windows_package_targets_x64_without_admin_install():
 
     assert 'target_arch="x86_64"' in spec
     assert "windows-app.manifest" in spec
+    assert "windows-version.txt" in spec
+    version_resource = (ROOT / "packaging" / "windows-version.txt").read_text("utf-8")
+    assert "3, 0, 0, 0" in version_resource
+    assert "ProductVersion', '3.0.0'" in version_resource
     assert "PrivilegesRequired=lowest" in installer
     assert "ArchitecturesAllowed=x64compatible" in installer
 

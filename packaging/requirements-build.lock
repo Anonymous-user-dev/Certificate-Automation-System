@@ -1,4 +1,4 @@
-# Windows x64 / CPython 3.12 release lock for Certificate Automation 3.0.0.
+# Windows x64 / CPython 3.12 or 3.13 release lock for Certificate Automation 3.0.0.
 # Install only with: python -m pip install --require-hashes -r packaging\requirements-build.lock
 --only-binary=:all:
 

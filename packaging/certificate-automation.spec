@@ -55,6 +55,7 @@ executable = EXE(
     argv_emulation=False,
     target_arch="x86_64",
     manifest=str(ROOT / "packaging" / "windows-app.manifest"),
+    version=str(ROOT / "packaging" / "windows-version.txt"),
     codesign_identity=None,
     entitlements_file=None,
 )

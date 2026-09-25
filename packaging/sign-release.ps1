@@ -1,9 +1,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateNotNullOrEmpty()]
-    [Alias("Input")]
-    [string[]] $Artifact,
+    [string] $Application,
+    [Parameter(Mandatory = $true)]
+    [string] $Installer,
 
     [string] $CertificateThumbprint,
     [string] $TimestampUrl,
@@ -49,7 +49,7 @@ if (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
     if (-not $signTool) {
         Stop-ReleaseSigning "SIGNTOOL_NOT_FOUND" "Install the Windows 10/11 SDK signing tools (x64)."
     }
-    foreach ($path in $Artifact) {
+    foreach ($path in @($Application, $Installer)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             Stop-ReleaseSigning "RELEASE_ARTIFACT_MISSING" "Artifact was not found: $path"
         }
@@ -67,7 +67,8 @@ if (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
 
 $verify = Join-Path $PSScriptRoot "verify-release.ps1"
 $verifyArguments = @{
-    Artifact = $Artifact
+    Application = $Application
+    Installer = $Installer
     OutputMetadata = $OutputMetadata
     AcceptanceRoot = $AcceptanceRoot
 }

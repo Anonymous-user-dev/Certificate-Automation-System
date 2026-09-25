@@ -7,7 +7,7 @@ param(
     [string] $TargetOS,
     [string] $TargetRelease,
     [ValidateSet(100, 150, 200)]
-    [int] $DisplayScale = 100,
+    [Nullable[int]] $DisplayScale,
     [string] $PriorInstaller,
     [string] $PythonExecutable = "python",
     [switch] $RecordOnly
@@ -31,6 +31,22 @@ function Get-Sha256([string] $Path) {
     } finally { $stream.Dispose() }
 }
 
+function Get-DisplayScalePercent {
+    if (-not ("CertificateAutomation.NativeDpi" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System.Runtime.InteropServices;
+namespace CertificateAutomation {
+    public static class NativeDpi {
+        [DllImport("user32.dll")] public static extern uint GetDpiForSystem();
+    }
+}
+"@
+    }
+    $dpi = [CertificateAutomation.NativeDpi]::GetDpiForSystem()
+    if ($dpi -le 0) { Stop-Acceptance "DISPLAY_SCALE_UNAVAILABLE" "Windows did not report a system DPI." }
+    return [int][Math]::Round(($dpi / 96.0) * 100)
+}
+
 if (-not (Test-Path -LiteralPath $Installer -PathType Leaf)) {
     Stop-Acceptance "INSTALLER_NOT_FOUND" "Installer was not found: $Installer"
 }
@@ -45,6 +61,7 @@ $installerItem = Get-Item -LiteralPath $Installer
 $installerHash = Get-Sha256 $installerItem.FullName
 $os = Get-CimInstance Win32_OperatingSystem
 $computer = Get-CimInstance Win32_ComputerSystem
+$currentVersion = Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
 $wordVersion = $null
 try {
     $word = New-Object -ComObject Word.Application
@@ -54,9 +71,14 @@ try {
 } catch { $wordVersion = $null }
 
 $systemDrive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'"
-$osName = if ($TargetOS) { $TargetOS } elseif ($os.Caption -match "Windows 11") { "Windows 11" } else { "Windows 10" }
-$release = if ($TargetRelease) { $TargetRelease } else { [string]$os.DisplayVersion }
-$evidenceId = "$($osName -replace ' ', '-')-$release-build-$($os.BuildNumber)-scale-$DisplayScale"
+$osName = if ($os.Caption -match "Windows 11") { "Windows 11" } elseif ($os.Caption -match "Windows 10") { "Windows 10" } else { [string]$os.Caption }
+$release = [string]$currentVersion.DisplayVersion
+if ([string]::IsNullOrWhiteSpace($release)) { Stop-Acceptance "HOST_RELEASE_UNAVAILABLE" "Windows DisplayVersion could not be measured." }
+$measuredScale = Get-DisplayScalePercent
+if ($TargetOS -and $TargetOS -ne $osName) { Stop-Acceptance "HOST_OS_MISMATCH" "Expected $TargetOS but measured $osName." }
+if ($TargetRelease -and $TargetRelease -ne $release) { Stop-Acceptance "HOST_RELEASE_MISMATCH" "Expected $TargetRelease but measured $release." }
+if ($null -ne $DisplayScale -and [int]$DisplayScale -ne $measuredScale) { Stop-Acceptance "HOST_SCALE_MISMATCH" "Expected $DisplayScale% but measured $measuredScale%." }
+$evidenceId = "$($osName -replace ' ', '-')-$release-build-$($os.BuildNumber)-scale-$measuredScale"
 $evidenceDirectory = Join-Path $OutputDirectory $evidenceId
 New-Item -ItemType Directory -Path $evidenceDirectory -Force | Out-Null
 
@@ -71,6 +93,7 @@ foreach ($id in $gateIds) { $results[$id] = [ordered]@{ id = $id; status = "not_
 
 function Invoke-Gate([string] $Id, [scriptblock] $Action) {
     try {
+        $global:LASTEXITCODE = 0
         & $Action
         if ($LASTEXITCODE -ne 0) { throw "Process exited with code $LASTEXITCODE" }
         $results[$Id].status = "passed"
@@ -103,7 +126,7 @@ if (-not $RecordOnly) {
     } else { $results["upgrade_from_2_1_1"].detail = "Prior installer was not supplied." }
     foreach ($scale in @(100, 150, 200)) {
         $id = "display_scale_$scale"
-        if ($scale -eq $DisplayScale) { Invoke-Gate $id { & $application "--ui-smoke-test" } }
+        if ($scale -eq $measuredScale) { Invoke-Gate $id { & $application "--ui-smoke-test" } }
         else { $results[$id].detail = "Run this exact installer in a separate session configured to $scale%." }
     }
     $uninstaller = Join-Path $env:LOCALAPPDATA "Programs\CertificateAutomation\unins000.exe"
@@ -114,7 +137,13 @@ if (-not $RecordOnly) {
 }
 
 $testResults = @($gateIds | ForEach-Object { $results[$_] })
-$overall = if ($RecordOnly) { "not_run" } elseif (@($testResults | Where-Object { $_.status -eq "failed" }).Count) { "failed" } elseif (@($testResults | Where-Object { $_.status -ne "passed" }).Count) { "incomplete" } else { "passed" }
+$requiredRunGates = @(
+    "silent_clean_install", "responsive_launch", "all_input_families", "save_and_recover",
+    "mixed_script_50_recipient_batch", "unicode_and_long_paths", "locked_file_recovery",
+    "upgrade_from_2_1_1", "silent_uninstall", "display_scale_$measuredScale"
+)
+$requiredResults = @($requiredRunGates | ForEach-Object { $results[$_] })
+$overall = if ($RecordOnly) { "not_run" } elseif (@($requiredResults | Where-Object { $null -eq $_ -or $_.status -eq "failed" }).Count) { "failed" } elseif (@($requiredResults | Where-Object { $_.status -ne "passed" }).Count) { "incomplete" } else { "passed" }
 $signature = Get-AuthenticodeSignature -LiteralPath $installerItem.FullName
 $payload = [ordered]@{
     schema_version = 1
@@ -123,13 +152,15 @@ $payload = [ordered]@{
     mode = if ($RecordOnly) { "record_only" } else { "execute" }
     target = [ordered]@{ os = $osName; release = $release }
     host = [ordered]@{
+        os = $osName
         edition = [string]$os.Caption
-        display_version = [string]$os.DisplayVersion
+        display_version = $release
         build = [string]$os.BuildNumber
         architecture = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
         manufacturer = [string]$computer.Manufacturer
         filesystem = [string]$systemDrive.FileSystem
-        display_scale_percent = $DisplayScale
+        display_scale_percent = $measuredScale
+        display_scale_measurement = "GetDpiForSystem"
         word_version = $wordVersion
     }
     installer = [ordered]@{
