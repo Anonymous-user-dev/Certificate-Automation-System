@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from certificate_automation.mapping import MappingSelection
+from certificate_automation.i18n import CatalogSet, package_root
 from certificate_automation.workbook import WorkbookData
 
 
@@ -30,32 +31,41 @@ class MappingPage(QWidget):
     back_requested = Signal()
     continue_requested = Signal()
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, *, catalogs: CatalogSet | None = None) -> None:
         super().__init__(parent)
+        self._catalogs = catalogs or CatalogSet.load(package_root())
+        self._catalogs.subscribe(lambda _locale: self.retranslate())
         self.rows: dict[str, MappingRow] = {}
         self._grid_widget = QWidget()
         self._grid = QGridLayout(self._grid_widget)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._grid_widget)
-        self.back_button = QPushButton("Back")
-        self.continue_button = QPushButton("Validate complete batch")
+        self.back_button = QPushButton()
+        self.continue_button = QPushButton()
         self.continue_button.setEnabled(False)
         actions = QGridLayout()
         actions.addWidget(self.back_button, 0, 0)
         actions.addWidget(self.continue_button, 0, 1)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Map template fields"))
-        explanation = QLabel(
-            "Review automatic matches. Choose an Excel column or enter one fixed value "
-            "for every placeholder."
-        )
-        explanation.setWordWrap(True)
-        layout.addWidget(explanation)
+        self.title = QLabel()
+        self.explanation = QLabel()
+        self.explanation.setWordWrap(True)
+        layout.addWidget(self.title)
+        layout.addWidget(self.explanation)
         layout.addWidget(scroll)
         layout.addLayout(actions)
         self.back_button.clicked.connect(self.back_requested)
         self.continue_button.clicked.connect(self.continue_requested)
+        self.retranslate()
+
+    def retranslate(self) -> None:
+        self.title.setText(self._catalogs.text("mapping.title"))
+        self.explanation.setText(self._catalogs.text("mapping.explanation"))
+        self.back_button.setText(self._catalogs.text("action.back"))
+        self.continue_button.setText(self._catalogs.text("legacy.mapping.validate"))
+        for control in (self.back_button, self.continue_button):
+            control.setAccessibleName(control.text())
 
     def configure(
         self,
@@ -68,13 +78,13 @@ class MappingPage(QWidget):
             if item.widget() is not None:
                 item.widget().deleteLater()
         self.rows.clear()
-        self._grid.addWidget(QLabel("Template placeholder"), 0, 0)
-        self._grid.addWidget(QLabel("Excel column"), 0, 1)
-        self._grid.addWidget(QLabel("Or fixed value"), 0, 2)
+        self._grid.addWidget(QLabel(self._catalogs.text("legacy.mapping.placeholder")), 0, 0)
+        self._grid.addWidget(QLabel(self._catalogs.text("legacy.mapping.column")), 0, 1)
+        self._grid.addWidget(QLabel(self._catalogs.text("legacy.mapping.fixed")), 0, 2)
         for row_number, placeholder in enumerate(placeholders, start=1):
             label = QLabel(f"{{{{{placeholder}}}}}")
             combo = QComboBox()
-            combo.addItem("No column selected", None)
+            combo.addItem(self._catalogs.text("legacy.mapping.none"), None)
             for header in workbook.headers:
                 combo.addItem(workbook.display_headers[header], header)
             suggested = suggestions.columns.get(placeholder)
@@ -82,7 +92,7 @@ class MappingPage(QWidget):
                 index = combo.findData(suggested)
                 combo.setCurrentIndex(index)
             fixed = QLineEdit()
-            fixed.setPlaceholderText("Optional fixed value")
+            fixed.setPlaceholderText(self._catalogs.text("legacy.mapping.fixed_optional"))
             fixed.setEnabled(combo.currentData() is None)
             combo.currentIndexChanged.connect(
                 lambda _index, selected=combo, entry=fixed: self._mapping_changed(
@@ -120,4 +130,3 @@ class MappingPage(QWidget):
             for row in self.rows.values()
         )
         self.continue_button.setEnabled(ready)
-

@@ -104,6 +104,38 @@ If you close the application during generation, it requests cancellation and wai
 - Always inspect the preview and a representative sample of the final PDFs.
 - Follow your institution's authorization, retention, signing, and distribution policies.
 
+## Projects and reusable mapping profiles
+
+A **project** is the saved draft for one controlled certificate workflow. It remembers the recipient snapshot, template reference and hash, mappings, output choices, review state, and language. Use **Save as** before changing an older project for a new event. If an older project format needs migration, the application validates both the original backup and upgraded copy before replacing anything.
+
+A **mapping profile** can reuse reviewed field rules with a compatible template. Apply it only after checking every suggested match. Sensitive fixed values are never silently copied into a new batch, and fuzzy suggestions still require operator confirmation.
+
+## Template health and layout review
+
+Template Health checks malformed fields, unsupported structures, external links, comments, page geometry, and representative long or multilingual values. The rendered **layout review** helps a person find clipping and page-count changes; it cannot prove that every font, printer driver, or visual detail is correct. Open every representative preview and inspect it at useful zoom before marking it reviewed.
+
+## Approval, corrections, and history
+
+Final approval freezes the exact data, template, mappings, warnings, output order, and print settings. Any relevant change invalidates that approval. Optional **two-person** mode records a distinct second person's review action; names are workflow notes, not authenticated identities, electronic signatures, or legal approval.
+
+Use **protected correction** from Batch History when a verified published batch needs replacement. The original revision stays unchanged, the correction receives a new revision, and the relationship is recorded. Run the **integrity** check before opening, exporting, or correcting an older batch. Missing, extra, renamed, reordered, or modified artifacts make the revision fail verification.
+
+## Print readiness and verified export
+
+For a combined PDF, **print readiness** verifies the manifest, recipient order, hashes, page count, page size, orientation, and optional blank separator pages. “Ready” means the file matches those recorded checks; it is not a promise about a particular physical printer. Print from the normal Windows PDF application and inspect printer settings before producing official copies.
+
+**Verified export** copies a published revision to a new empty local folder, never overwrites an existing destination, and re-hashes the copied artifacts. The original local NTFS publication remains authoritative; the export is identified as a verified copy.
+
+## Offline support ZIP
+
+**Create offline support package** produces a redacted support ZIP by default. It contains diagnostic facts and version information, not recipient tables, source documents, generated certificates, or previews. Only include sensitive material when your institution has explicitly approved it, and inspect the ZIP before sharing.
+
+## Windows and release status
+
+The application targets 64-bit Windows 10 22H2 and Windows 11 24H2/25H2. Desktop Microsoft Word is required for PDF conversion; DOCX-only output can still be used when Word PDF automation is unavailable. All runtime processing remains offline.
+
+Check `release-status.json` beside this guide before deployment. A row marked `machine_verification_pending` has not been tested on that exact Windows release with the exact installer hash. An **unsigned** installer will show Windows publisher warnings and must be distributed only under your organization's approved exception process. Do not describe a candidate as a verified release until the exact installer, signature state, clean install, upgrade, uninstall, Word tests, 50-recipient acceptance, and required Windows rows have recorded evidence.
+
 ## When asking for technical support
 
 Provide the application version, `support.log`, and—only if the run failed—`diagnostic.json`. The support log contains operational codes and counts but no recipient values or output filenames. Do not send the workbook, template, certificates, draft project, preview, or `manifest.json` unless your institution has approved sharing personal data.

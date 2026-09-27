@@ -141,6 +141,13 @@ def test_release_verifier_contract_checks_exact_bundle_internals():
         assert required in script
 
 
+def test_release_verifier_does_not_reuse_a_stale_native_exit_code():
+    script = (ROOT / "packaging" / "verify-release.ps1").read_text("utf-8")
+
+    assert "$LASTEXITCODE = 0" in script
+    assert script.index("$LASTEXITCODE = 0") < script.index("$matrixJson = & $validator")
+
+
 def test_acceptance_refuses_non_executable_installer(tmp_path):
     installer = tmp_path / "installer.txt"
     installer.write_text("wrong artifact", "utf-8")

@@ -99,6 +99,7 @@ $overallSignature = if ($signed.Count -eq 2) { "signed" } elseif ($signed.Count 
 $publisher = if ($overallSignature -eq "signed" -and ($artifacts.publisher | Select-Object -Unique).Count -eq 1) { $artifacts[0].publisher } else { $null }
 $installerHash = $artifacts[1].sha256
 $validator = Join-Path $PSScriptRoot "validate-acceptance.ps1"
+$LASTEXITCODE = 0
 $matrixJson = & $validator -AcceptanceRoot $AcceptanceRoot -InstallerHash $installerHash
 if ($LASTEXITCODE -ne 0) { Stop-ReleaseVerification "ACCEPTANCE_VALIDATION_FAILED" "Windows acceptance evidence could not be validated." }
 $matrix = @($matrixJson | ConvertFrom-Json)

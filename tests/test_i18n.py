@@ -1,11 +1,15 @@
+import ast
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from PySide6.QtCore import QSettings
 
 from certificate_automation.i18n import CatalogError, CatalogSet, validate_catalogs
 from certificate_automation.domain import Issue, Severity
 from certificate_automation.ui.validation_page import ValidationPage
 from certificate_automation.validation import ValidationReport
+from certificate_automation.ui.workspace import WorkspaceWindow
 
 
 PACKAGE_ROOT = Path(__file__).parents[1] / "src" / "certificate_automation"
@@ -196,3 +200,53 @@ def test_changed_template_during_generation_has_complete_offline_translations():
         assert CatalogSet.load(PACKAGE_ROOT, locale).text(
             "template.changed_during_generation"
         )
+
+
+def test_operator_ui_source_has_no_untranslated_literal_labels():
+    """Prevent new English-only controls from bypassing the offline catalogs."""
+    constructors = {"QLabel", "QPushButton", "QCheckBox", "QRadioButton", "QGroupBox"}
+    setters = {
+        "setText", "setTitle", "setPlaceholderText", "setAccessibleName",
+        "setAccessibleDescription", "addRow",
+    }
+    technical = {"", "—"}
+    leaks = []
+    for path in sorted((PACKAGE_ROOT / "ui").glob("*.py")):
+        tree = ast.parse(path.read_text("utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            name = (
+                node.func.id if isinstance(node.func, ast.Name)
+                else node.func.attr if isinstance(node.func, ast.Attribute)
+                else ""
+            )
+            if name not in constructors | setters:
+                continue
+            value = node.args[0]
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                literal = value.value
+                if literal not in technical and any(character.isalpha() for character in literal):
+                    leaks.append(f"{path.name}:{node.lineno}:{literal}")
+    assert leaks == []
+
+
+@pytest.mark.parametrize("locale", ["zh_CN", "ru"])
+def test_workspace_primary_workflow_renders_without_english_fallback(
+    locale, qtbot, tmp_path,
+):
+    catalogs = CatalogSet.load(PACKAGE_ROOT, locale)
+    settings = QSettings(
+        str(tmp_path / f"{locale}-i18n.ini"), QSettings.Format.IniFormat,
+    )
+    window = WorkspaceWindow(SimpleNamespace(catalogs=catalogs), settings=settings)
+    qtbot.addWidget(window)
+    window.show()
+    window.new_project()
+    window.set_locale(locale)
+
+    assert window.step_rail.text_for("data") == catalogs.text("nav.data")
+    assert window.data_page.title.text() == catalogs.text("data.title")
+    assert window.output_page.title.text() == catalogs.text("output.title")
+    assert window.results_page.title.text() == catalogs.text("results.title")
+    assert window.data_page.title.text() != CatalogSet.load(PACKAGE_ROOT, "en").text("data.title")

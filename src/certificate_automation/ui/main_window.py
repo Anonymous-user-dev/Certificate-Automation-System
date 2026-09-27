@@ -8,6 +8,7 @@ from PySide6.QtCore import QThread, QTimer
 from PySide6.QtWidgets import QLabel, QMainWindow, QStackedWidget, QVBoxLayout, QWidget
 
 from certificate_automation.batch import BatchRequest, CancellationToken
+from certificate_automation.i18n import CatalogSet, package_root
 from certificate_automation.recovery import RecoveryScanError
 from certificate_automation.ui.files_page import FilesPage
 from certificate_automation.ui.generation_page import GenerationPage
@@ -21,13 +22,14 @@ class MainWindow(QMainWindow):
     def __init__(self, services, parent=None) -> None:
         super().__init__(parent)
         self.services = services
-        self.setWindowTitle("Certificate Automation")
+        self.catalogs = services.catalogs or CatalogSet.load(package_root())
+        self.setWindowTitle(self.catalogs.text("app.title"))
         self.resize(860, 640)
-        self.files_page = FilesPage()
-        self.mapping_page = MappingPage()
-        self.validation_page = ValidationPage()
-        self.preview_page = PreviewPage()
-        self.generation_page = GenerationPage()
+        self.files_page = FilesPage(catalogs=self.catalogs)
+        self.mapping_page = MappingPage(catalogs=self.catalogs)
+        self.validation_page = ValidationPage(catalogs=self.catalogs)
+        self.preview_page = PreviewPage(catalogs=self.catalogs)
+        self.generation_page = GenerationPage(catalogs=self.catalogs)
         self.stack = QStackedWidget()
         for page in (
             self.files_page,
@@ -37,10 +39,10 @@ class MainWindow(QMainWindow):
             self.generation_page,
         ):
             self.stack.addWidget(page)
-        steps = QLabel("1 Files  ›  2 Mapping  ›  3 Validation  ›  4 Preview  ›  5 Generate")
+        self.steps = QLabel(self.catalogs.text("legacy.steps"))
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.addWidget(steps)
+        layout.addWidget(self.steps)
         layout.addWidget(self.stack)
         self.setCentralWidget(container)
 
@@ -59,8 +61,8 @@ class MainWindow(QMainWindow):
 
         self.files_page.workbook_selected.connect(self._request_worksheets)
         self.files_page.destination_selected.connect(self._check_recovery)
-        if self.services.catalogs is not None:
-            self.services.catalogs.subscribe(lambda _locale: self._refresh_recovery_state())
+        self.catalogs.subscribe(lambda _locale: self._refresh_recovery_state())
+        self.catalogs.subscribe(lambda _locale: self._retranslate())
         self.files_page.view_recovery_requested.connect(self._view_recovery)
         self.files_page.remove_recovery_requested.connect(self._remove_recovery)
         self.files_page.continue_requested.connect(self._load_inputs)
@@ -78,6 +80,10 @@ class MainWindow(QMainWindow):
         )
         self.preview_page.generate_requested.connect(self._generate_batch)
         self.generation_page.cancel_requested.connect(self._request_cancel)
+
+    def _retranslate(self) -> None:
+        self.setWindowTitle(self.catalogs.text("app.title"))
+        self.steps.setText(self.catalogs.text("legacy.steps"))
 
     @property
     def current_page(self):
@@ -144,13 +150,13 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.validation_page)
 
     def _generate_preview(self) -> None:
-        self.preview_page.status_label.setText("Generating and verifying preview…")
+        self.preview_page.status_label.setText(self.catalogs.text("legacy.preview.generating"))
         self.stack.setCurrentWidget(self.preview_page)
 
         def success(path):
             opened = self.services.open_path(Path(path))
-            message = "Preview generated and opened." if opened else "Preview generated."
-            self.preview_page.status_label.setText(f"{message} {path}")
+            key = "legacy.preview.opened" if opened else "legacy.preview.generated"
+            self.preview_page.status_label.setText(self.catalogs.text(key, path=path))
 
         self._start_operation(
             lambda: self.services.preview(
@@ -160,7 +166,7 @@ class MainWindow(QMainWindow):
             ),
             success,
             lambda error: self.preview_page.status_label.setText(
-                f"Preview failed safely. {error}"
+                self.catalogs.text("legacy.preview.failed", detail=error)
             ),
         )
 
@@ -210,7 +216,7 @@ class MainWindow(QMainWindow):
         if self.cancellation is not None:
             self.cancellation.request()
             self.generation_page.status_label.setText(
-                "Cancellation requested. Finishing the current document safely…"
+                self.catalogs.text("generation.cancel_pending")
             )
 
     def _check_recovery(self, value: str) -> None:
@@ -225,9 +231,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_recovery_state(self) -> None:
         if self._recovery_scan_unavailable:
-            catalogs = self.services.catalogs
-            message = (catalogs.text("recovery.scan_unavailable") if catalogs is not None
-                       else "Recovery scan is unavailable. Check folder access and try again.")
+            message = self.catalogs.text("recovery.scan_unavailable")
             self.files_page.set_incomplete_batches(
                 self._recovery_records, unavailable_message=message,
             )

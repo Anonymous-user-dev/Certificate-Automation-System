@@ -252,7 +252,10 @@ def test_operator_configures_history_check_and_must_acknowledge_unavailable_hist
     template_path = docx_factory(paragraph_runs=[["{{FULL_NAME}}"], ["{{AWARD}}"]])
     services = _services(tmp_path, template_path)
     services.history_index = HistoryIndex(tmp_path / "missing-history.sqlite", Protector())
-    window = WorkspaceWindow(services)
+    settings = QSettings(
+        str(tmp_path / "history-warning.ini"), QSettings.Format.IniFormat,
+    )
+    window = WorkspaceWindow(services, settings=settings)
     qtbot.addWidget(window)
     project_path = tmp_path / "Duplicate Review.certproject"
     window.new_project(project_path)

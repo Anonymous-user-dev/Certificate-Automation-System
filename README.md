@@ -2,6 +2,8 @@
 
 Certificate Automation 3.0 is a fully offline Windows desktop application for generating official certificate batches from Excel, CSV, TSV, pasted, or manually entered tables and a Word template. It selects editable DOCX plus individual PDFs by default and can optionally create one combined print PDF. Nothing is published unless the complete selected batch verifies successfully.
 
+> Release status: the source is at version 3.0.0, but the exact 3.0.0 installer has not yet completed all release gates on this host. See `release-status.json`. No `v3.0.0` tag should be created while `tag_allowed` is false.
+
 ## Product guarantees
 
 - Guided PySide6 interface for nontechnical staff.
@@ -68,6 +70,8 @@ If Inno Setup 6 is installed:
 The application files appear under `dist/CertificateAutomation/`; the installer appears under `dist/installer/`. Build artifacts are intentionally ignored by Git.
 
 The application manifest declares Windows 10/11 compatibility, x64, per-monitor DPI awareness, UTF-8, long-path support, and ordinary-user (`asInvoker`) execution. The installer is per-user and requires no administrator elevation.
+
+Compatibility declarations are not machine-test evidence. Windows 10 22H2 and Windows 11 24H2/25H2 remain plainly marked `machine_verification_pending` until results for the exact installer SHA-256 are recorded. Builds are unsigned unless the organization supplies its certificate and the verification script confirms the configured signer.
 
 ## Verify or sign a release
 

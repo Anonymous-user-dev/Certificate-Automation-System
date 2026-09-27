@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import tomllib
 import xml.etree.ElementTree as ET
 
@@ -71,3 +72,29 @@ def test_locales_and_csv_example_are_declared_for_source_and_windows_packages():
     assert "sample_recipients.csv" in spec
     assert "sample_recipients.csv" in installer
     assert (ROOT / "examples" / "sample_recipients.csv").is_file()
+
+
+def test_offline_guide_covers_every_official_document_safety_workflow():
+    guide = (ROOT / "docs" / "user-guide.md").read_text("utf-8").casefold()
+    required = (
+        "project", "mapping profile", "layout review", "two-person",
+        "protected correction", "integrity", "support zip", "print readiness",
+        "verified export", "windows 10", "windows 11", "microsoft word",
+        "unsigned",
+    )
+    assert all(term in guide for term in required)
+
+
+def test_release_status_is_honest_until_exact_installer_matrix_is_verified():
+    status = json.loads((ROOT / "release-status.json").read_text("utf-8"))
+
+    assert status["version"] == "3.0.0"
+    assert status["offline"] is True
+    assert status["signature_status"] in {"unsigned", "verified"}
+    assert status["installer"]["state"] in {"verified", "built_not_release_verified", "not_built"}
+    expected = {"windows_10_22h2", "windows_11_24h2", "windows_11_25h2"}
+    assert set(status["windows_matrix"]) == expected
+    for row in status["windows_matrix"].values():
+        assert row["state"] in {"verified", "machine_verification_pending"}
+    if status["installer"]["state"] != "verified":
+        assert status["tag_allowed"] is False

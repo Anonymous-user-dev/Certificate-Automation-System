@@ -6,7 +6,7 @@ import os
 import sys
 
 
-def _run_ui_smoke_test() -> None:
+def _run_ui_smoke_test() -> int:
     """Import Qt and construct the real workspace before reporting success."""
 
     from PySide6.QtCore import QSettings
@@ -20,17 +20,20 @@ def _run_ui_smoke_test() -> None:
         QSettings.Format.IniFormat,
         QSettings.Scope.UserScope,
         "Certificate Automation",
-        "Package Smoke Test",
+        f"Package Smoke Test {os.getpid()}",
     )
     window = WorkspaceWindow(create_default_services("en"), settings=settings)
     window.show()
     application.processEvents()
     exit_code = 0 if window.isVisible() else 3
     window.close()
-    os._exit(exit_code)
+    window.deleteLater()
+    application.processEvents()
+    application.quit()
+    return exit_code
 
 
-def _run_workflow_smoke_test() -> None:
+def _run_workflow_smoke_test() -> int:
     """Exercise the packaged beginner workflow without opening user files."""
 
     from PySide6.QtCore import QSettings
@@ -44,7 +47,7 @@ def _run_workflow_smoke_test() -> None:
         QSettings.Format.IniFormat,
         QSettings.Scope.UserScope,
         "Certificate Automation",
-        "Workflow Package Smoke Test",
+        f"Workflow Package Smoke Test {os.getpid()}",
     )
     window = WorkspaceWindow(create_default_services("en"), settings=settings)
     window.new_project()
@@ -63,13 +66,16 @@ def _run_workflow_smoke_test() -> None:
         )
     )
     window.close()
-    os._exit(0 if correct else 4)
+    window.deleteLater()
+    application.processEvents()
+    application.quit()
+    return 0 if correct else 4
 
 
 if "--workflow-smoke-test" in sys.argv:
-    _run_workflow_smoke_test()
+    raise SystemExit(_run_workflow_smoke_test())
 elif "--smoke-test" in sys.argv or "--ui-smoke-test" in sys.argv:
-    _run_ui_smoke_test()
+    raise SystemExit(_run_ui_smoke_test())
 
 from certificate_automation.app import main  # noqa: E402
 

@@ -1,0 +1,19 @@
+{
+  "version": "3.0.0",
+  "release_state": "candidate",
+  "offline": true,
+  "signature_status": "unsigned",
+  "installer": {
+    "state": "built_not_release_verified",
+    "path": "dist/installer/CertificateAutomation-Setup-3.0.0.exe",
+    "size": 42231132,
+    "sha256": "b9d3613753500dccc82970024283921df6d65c7481b396006c7c69943b9a0138",
+    "reason": "Exact-source package, clean install, packaged checks, Word integration, and clean uninstall passed locally. Upgrade and required Windows matrix evidence remain incomplete."
+  },
+  "windows_matrix": {
+    "windows_10_22h2": {"state": "machine_verification_pending", "installer_sha256": null},
+    "windows_11_24h2": {"state": "machine_verification_pending", "installer_sha256": null},
+    "windows_11_25h2": {"state": "machine_verification_pending", "installer_sha256": null}
+  },
+  "tag_allowed": false
+}
