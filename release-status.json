@@ -6,8 +6,8 @@
   "installer": {
     "state": "built_not_release_verified",
     "path": "dist/installer/CertificateAutomation-Setup-3.0.0.exe",
-    "size": 42231132,
-    "sha256": "b9d3613753500dccc82970024283921df6d65c7481b396006c7c69943b9a0138",
+    "size": 42226406,
+    "sha256": "e62f015929fa26e1f6cafd86a372e344b0a1f4c9432f1322fb45c8e9d4df789e",
     "reason": "Exact-source package, clean install, packaged checks, Word integration, and clean uninstall passed locally. Upgrade and required Windows matrix evidence remain incomplete."
   },
   "windows_matrix": {

@@ -24,6 +24,8 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#AppExeName}
+CreateUninstallRegKey=not IsReleaseVerification
+Uninstallable=not IsReleaseVerification
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -39,8 +41,14 @@ Source: "..\examples\sample_certificate_template.docx"; DestDir: "{app}\examples
 Source: "..\docs\user-guide.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Check: not IsReleaseVerification
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon; Check: not IsReleaseVerification
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent; Check: not IsReleaseVerification
+
+[Code]
+function IsReleaseVerification: Boolean;
+begin
+  Result := ExpandConstant('{param:RELEASEVERIFY|0}') = '1';
+end;

@@ -69,7 +69,10 @@ def _revision(
         ),
     )
     write_manifest(context, folder / "manifest.json")
-    counts = {"recipients": 3, "docx": 0, "pdf": 3, "combined": 1}
+    counts = {
+        "recipients": 3, "docx": 0, "pdf": 3, "combined": 1,
+        "separator": len(combined.separator_positions),
+    }
     (folder / "batch_journal.json").write_text(json.dumps({
         "schema_version": 1, "batch_id": "batch-1", "state": "published",
         "approval_digest": "a" * 64, "revision": 1,

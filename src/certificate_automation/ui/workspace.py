@@ -2037,6 +2037,9 @@ class WorkspaceWindow(QMainWindow):
         thread.start()
 
     def _generation_finished(self, result) -> None:
+        if result.state is BatchState.CANCELLED:
+            self.results_page.set_cancelled()
+            return
         if (
             result.state is BatchState.PUBLISHED and result.output_dir is not None
             and self._loaded_project is not None and self.coordinator is not None

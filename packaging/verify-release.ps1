@@ -98,6 +98,37 @@ $signed = @($artifacts | Where-Object { $_.signature_status -eq "signed" })
 $overallSignature = if ($signed.Count -eq 2) { "signed" } elseif ($signed.Count -eq 0) { "unsigned" } else { "mixed" }
 $publisher = if ($overallSignature -eq "signed" -and ($artifacts.publisher | Select-Object -Unique).Count -eq 1) { $artifacts[0].publisher } else { $null }
 $installerHash = $artifacts[1].sha256
+
+# Verify what the installer actually contains.  RELEASEVERIFY installs into an
+# isolated directory without registering an uninstall entry or creating links.
+$payloadVerifier = Join-Path $PSScriptRoot "verify-payload.ps1"
+$verificationRoot = Join-Path ([IO.Path]::GetTempPath()) ("certificate-automation-release-verify-" + [Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $verificationRoot | Out-Null
+try {
+    $installArguments = @(
+        "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
+        "/RELEASEVERIFY=1", "/DIR=`"$verificationRoot`""
+    )
+    $install = Start-Process -FilePath $installerPath -ArgumentList $installArguments -WindowStyle Hidden -Wait -PassThru
+    if ($install.ExitCode -ne 0) {
+        Stop-ReleaseVerification "RELEASE_VERIFY_INSTALL_FAILED" "The installer failed isolated payload verification."
+    }
+    $payloadArguments = @{ BundleRoot = $bundleRoot; InstalledRoot = $verificationRoot }
+    if ($RequireSigning) {
+        $payloadArguments.RequireSigning = $true
+        $payloadArguments.ExpectedThumbprint = $ExpectedThumbprint
+    }
+    $LASTEXITCODE = 0
+    & $payloadVerifier @payloadArguments
+    if ($LASTEXITCODE -ne 0) {
+        Stop-ReleaseVerification "INSTALLED_PAYLOAD_INVALID" "The installed payload does not match the verified application bundle."
+    }
+} finally {
+    if (Test-Path -LiteralPath $verificationRoot) {
+        Remove-Item -LiteralPath $verificationRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 $validator = Join-Path $PSScriptRoot "validate-acceptance.ps1"
 $LASTEXITCODE = 0
 $matrixJson = & $validator -AcceptanceRoot $AcceptanceRoot -InstallerHash $installerHash

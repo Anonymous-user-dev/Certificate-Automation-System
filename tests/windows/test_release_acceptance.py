@@ -100,7 +100,7 @@ def test_real_word_publishes_verified_50_recipient_mixed_script_batch(tmp_path):
         source_sha256=dataset.source.sha256,
         template_sha256=template.sha256,
         mapping=plan.to_json(),
-        health_review={"release_acceptance": True},
+        health_review={"release_acceptance": True, "expected_pages": 1},
         preview_hashes=("release-acceptance-preview",),
         warning_codes=(),
         warning_ack_digest=None,

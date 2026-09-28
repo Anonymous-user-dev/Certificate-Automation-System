@@ -96,3 +96,64 @@ def test_verification_requested_as_signed_requires_expected_thumbprint(tmp_path)
 
     assert result.returncode != 0
     assert "SIGNING_EXPECTED_THUMBPRINT_REQUIRED" in result.stderr
+
+
+def test_signing_pipeline_builds_installer_only_after_signed_bundle_verifies(tmp_path):
+    # Signing tools and certificate storage are external Windows dependencies.
+    # The real pipeline runs; the compiler embeds the bytes it receives.
+    script_root = tmp_path / "packaging"
+    script_root.mkdir()
+    for name in ("sign-release.ps1", "verify-payload.ps1"):
+        source = ROOT / "packaging" / name
+        if source.exists():
+            shutil.copyfile(source, script_root / name)
+    (script_root / "installer.iss").write_text("fixture", "utf-8")
+    (script_root / "verify-release.ps1").write_text(
+        'param($Application, $Installer, $OutputMetadata, $AcceptanceRoot, '
+        '$ExpectedThumbprint, [switch]$RequireSigning)\n'
+        'if ([IO.File]::ReadAllText($Installer) -ne "signed:application") { throw "unsigned embedded application" }\n'
+        '[IO.File]::WriteAllText($OutputMetadata, "verified")\n', "utf-8"
+    )
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    application = bundle / "CertificateAutomation.exe"
+    application.write_text("application", "utf-8")
+    installer = tmp_path / "CertificateAutomation-Setup-3.0.0.exe"
+    metadata = tmp_path / "metadata.json"
+    harness = tmp_path / "harness.ps1"
+    harness.write_text(
+        r'''param($Script, $Application, $Installer, $Metadata)
+$ErrorActionPreference = 'Stop'
+function Get-ChildItem {
+    param($LiteralPath, $Filter, [switch]$File, [switch]$Recurse)
+    if ($LiteralPath -like 'Cert:*') { return [pscustomobject]@{HasPrivateKey=$true} }
+    Microsoft.PowerShell.Management\Get-ChildItem @PSBoundParameters
+}
+function Get-Command { param($Name, $ErrorAction); if ($Name -eq 'signtool.exe') { return [pscustomobject]@{Source='TestSignTool'} }; Microsoft.PowerShell.Core\Get-Command $Name }
+function TestSignTool {
+    $path = $args[-1]
+    if ($args[0] -eq 'sign' -and $path -eq $Application) { [IO.File]::WriteAllText($path, 'signed:application') }
+    $global:LASTEXITCODE = 0
+}
+function Get-AuthenticodeSignature {
+    param($LiteralPath)
+    $status = if ([IO.File]::ReadAllText($LiteralPath) -eq 'signed:application') { 'Valid' } else { 'NotSigned' }
+    [pscustomobject]@{Status=$status; SignerCertificate=[pscustomobject]@{Thumbprint=('A'*40)}}
+}
+function TestCompiler {
+    if ([IO.File]::ReadAllText($Application) -ne 'signed:application') { throw 'compiler received unsigned bundle' }
+    [IO.File]::WriteAllText($Installer, [IO.File]::ReadAllText($Application))
+    $global:LASTEXITCODE = 0
+}
+& $Script -Application $Application -Installer $Installer -InstallerCompiler TestCompiler -CertificateThumbprint ('A'*40) -RequireSigning -OutputMetadata $Metadata
+''', "utf-8"
+    )
+
+    result = _run_script(
+        harness, _native_path(script_root / "sign-release.ps1"),
+        _native_path(application), _native_path(installer), _native_path(metadata),
+    )
+
+    assert result.returncode == 0 and not result.stderr, result.stderr
+    assert installer.read_text("utf-8") == "signed:application"
+    assert metadata.read_text("utf-8") == "verified"

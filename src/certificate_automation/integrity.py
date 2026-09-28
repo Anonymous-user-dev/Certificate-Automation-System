@@ -112,12 +112,27 @@ class IntegrityService:
             }
             if any(counts.get(key) != value for key, value in actual_counts.items()):
                 issues.append("integrity.count_mismatch")
+            artifacts = manifest.get("artifacts", [])
+            report_count = sum(
+                artifact.get("filename") == "batch_summary.html" for artifact in artifacts
+            )
+            if report_count != 1:
+                issues.append("integrity.report_missing")
+            frozen_counts = {
+                "docx": actual_counts["docx"],
+                "pdf": actual_counts["pdf"],
+                "combined": actual_counts["combined_pdf"],
+                "manifest": 1,
+                "report": report_count,
+                "separator": len(combined.get("separator_positions", []))
+                if isinstance(combined, dict) else 0,
+            }
             if approved_snapshot is not None and (
                 manifest.get("approval_digest") != approved_snapshot.digest
                 or approved_snapshot.recipient_count != actual_counts["recipients"]
                 or any(
-                    approved_snapshot.output_counts.get(key) != actual_counts[manifest_key]
-                    for key, manifest_key in (("docx", "docx"), ("pdf", "pdf"), ("combined", "combined_pdf"))
+                    frozen_counts.get(key) != value
+                    for key, value in approved_snapshot.output_counts.items()
                 )
             ):
                 issues.append("integrity.external_approval_mismatch")
@@ -156,7 +171,7 @@ class IntegrityService:
                             issues.append("integrity.page_geometry_mismatch")
                     except Exception:
                         issues.append("integrity.pdf_invalid")
-            for artifact in manifest.get("artifacts", []):
+            for artifact in artifacts:
                 add(artifact.get("filename"), artifact.get("sha256"), artifact.get("size"))
             journal = folder / "batch_journal.json"
             if not journal.is_file() or journal.is_symlink():
@@ -185,11 +200,14 @@ class IntegrityService:
                     else:
                         expected_counts = {
                             "recipients": actual_counts["recipients"],
-                            "docx": actual_counts["docx"],
-                            "pdf": actual_counts["pdf"],
-                            "combined": actual_counts["combined_pdf"],
+                            **frozen_counts,
                         }
-                        if any(intended.get(key) != value for key, value in expected_counts.items()) or approved_rows != order:
+                        if (
+                            any(intended.get(key) != expected_counts[key]
+                                for key in ("recipients", "docx", "pdf", "combined"))
+                            or any(expected_counts.get(key) != value for key, value in intended.items())
+                            or approved_rows != order
+                        ):
                             issues.append("integrity.approval_output_mismatch")
                         if record.get("approval_facts_sha256") != approval_facts_digest(
                             record.get("approval_digest"), intended, approved_rows
@@ -202,7 +220,12 @@ class IntegrityService:
                             not isinstance(approved_counts, dict)
                             or snapshot.get("digest") != record.get("approval_digest")
                             or snapshot.get("recipient_count") != intended.get("recipients")
-                            or any(approved_counts.get(key) != intended.get(key) for key in ("docx", "pdf", "combined"))
+                            or any(
+                                approved_counts.get(key) != intended.get(key)
+                                or approved_counts.get(key) != frozen_counts.get(key)
+                                for key in ({"docx", "pdf", "combined"} | set(approved_counts)
+                                            | (set(intended) - {"recipients"}))
+                            )
                         ):
                             issues.append("integrity.approval_output_mismatch")
                 except (ValueError, OSError):

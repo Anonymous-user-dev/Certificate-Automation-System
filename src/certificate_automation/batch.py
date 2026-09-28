@@ -15,6 +15,8 @@ from threading import Event
 from typing import Callable
 from uuid import uuid4
 
+from pypdf import PdfReader
+
 from certificate_automation import __version__
 from certificate_automation.approval import ApprovalInput, ApprovalService, WorkflowApproval
 from certificate_automation.audit import (
@@ -41,7 +43,7 @@ from certificate_automation.pdf_merge import (
     CombinedPdfRecord,
     merge_verified_pdfs,
 )
-from certificate_automation.print_readiness import PrintReadinessService, PrintSettings
+from certificate_automation.print_readiness import PrintReadinessService, PrintSettings, _page_matches
 from certificate_automation.template import TemplateInspection, render_template
 from certificate_automation.validation import validate_preflight
 from certificate_automation.verification import (
@@ -408,14 +410,14 @@ class BatchGenerator:
         assert isinstance(plan, MappingPlan)
         assert isinstance(outputs, OutputOptions)
 
-        if outputs.combined_pdf:
+        if outputs.individual_pdf or outputs.combined_pdf:
             try:
                 if not isinstance(outputs.print_settings, PrintSettings):
                     raise ValueError("print.settings_invalid")
                 PrintSettings.from_json(outputs.print_settings.to_json())
             except (ValueError, TypeError, KeyError, AttributeError, ArithmeticError) as error:
                 raise BatchGenerationError(
-                    "Approved page size is required for a combined PDF.",
+                    "Approved page size is required for PDF generation.",
                     code="output.print_settings_required",
                 ) from error
 
@@ -427,6 +429,13 @@ class BatchGenerator:
                 code=code,
                 user_action="Return to Final approval and approve the current project revision.",
             )
+        if outputs.individual_pdf or outputs.combined_pdf:
+            expected_pages = request.approval_input.health_review.get("expected_pages")
+            if type(expected_pages) is not int or expected_pages < 1:
+                raise BatchGenerationError(
+                    "The approved layout review must specify pages per certificate.",
+                    code="preview.page_count_unknown",
+                )
         self._require_source_hash(dataset)
 
         cancellation = cancellation or CancellationToken()
@@ -599,12 +608,27 @@ class BatchGenerator:
                 )
 
             if needs_pdf:
+                approved_pages = request.approval_input.health_review["expected_pages"]
+                approved_settings = PrintSettings.from_json(request.approval_input.print_settings)
                 for index, row_id in enumerate(outputs.row_ids, start=1):
                     if cancellation.requested:
                         return self._cancel(staging)
                     pdf_path = docx_by_row[row_id].with_suffix(".pdf")
                     self._converter.convert(docx_by_row[row_id], pdf_path)
                     page_counts[row_id] = pdf_page_count(pdf_path)
+                    if page_counts[row_id] != approved_pages:
+                        raise BatchGenerationError(
+                            "A certificate PDF differs from the approved layout page count.",
+                            code="print.page_count_mismatch",
+                        )
+                    if any(
+                        not _page_matches(page, approved_settings)
+                        for page in PdfReader(pdf_path, strict=True).pages
+                    ):
+                        raise BatchGenerationError(
+                            "A certificate PDF differs from the approved page geometry.",
+                            code="print.not_ready",
+                        )
                     pdf_by_row[row_id] = pdf_path
                     self._emit(
                         progress,

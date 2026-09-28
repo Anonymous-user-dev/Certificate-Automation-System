@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QLabel, QProgressBar, QPushButton, QVBoxLayout, QWidget
 
-from certificate_automation.i18n import CatalogSet
+from certificate_automation.i18n import CatalogError, CatalogSet
 
 
 class ResultsPage(QWidget):
@@ -41,6 +41,7 @@ class ResultsPage(QWidget):
         self.export_button = QPushButton()
         self._readiness = None
         self._export_status = ""
+        self._progress_event = None
         layout = QVBoxLayout(self)
         for widget in (
             self.title,
@@ -73,6 +74,7 @@ class ResultsPage(QWidget):
         self._expected_combined = False
         self._readiness = None
         self._export_status = ""
+        self._progress_event = None
         self.status_label.clear()
         self.progress.setValue(0)
         self.generate_button.setEnabled(True)
@@ -86,18 +88,25 @@ class ResultsPage(QWidget):
         self._expected_combined = False
         self._readiness = None
         self._export_status = ""
+        self._progress_event = None
         self.generate_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self._enable_results(False)
-        self.status_label.setText(self._catalogs.text("generation.running"))
+        self._show_running_status()
 
     def set_expected_combined(self, selected: bool) -> None:
         self._expected_combined = bool(selected)
 
     def update_progress(self, event) -> None:
+        self._progress_event = event
         self.progress.setMaximum(max(int(event.total), 1))
         self.progress.setValue(int(event.current))
-        self.status_label.setText(str(event.message))
+        self._show_running_status()
+
+    def set_cancelled(self) -> None:
+        self.set_ready()
+        self.state = "cancelled"
+        self.status_label.setText(self._catalogs.text("generation.cancelled"))
 
     def set_published(self, result, *, readiness=None) -> None:
         self.state = "published"
@@ -132,7 +141,7 @@ class ResultsPage(QWidget):
         self.generate_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self._enable_results(False)
-        self.status_label.setText(str(error))
+        self._show_failure_status()
 
     def show_open_error(self) -> None:
         self.status_label.setText(self._catalogs.text("results.open_combined_failed"))
@@ -143,6 +152,34 @@ class ResultsPage(QWidget):
         self.open_combined_button.setEnabled(bool(report.ready and path and path.is_file()))
         if self.state == "published":
             self._show_published_status()
+
+    def _show_running_status(self) -> None:
+        event = self._progress_event
+        if event is None:
+            self.status_label.setText(self._catalogs.text("generation.running"))
+            return
+        phase_keys = {
+            "preflight": "generation.phase.preflight",
+            "docx": "generation.phase.docx",
+            "pdf": "generation.phase.pdf",
+            "combined_pdf": "generation.phase.combined_pdf",
+            "verification": "generation.phase.verify",
+            "publication": "generation.phase.publish",
+        }
+        phase = self._catalogs.text(
+            phase_keys.get(getattr(event, "phase", None), "generation.running")
+        )
+        self.status_label.setText(self._catalogs.text(
+            "results.progress", phase=phase, current=int(event.current), total=int(event.total),
+        ))
+
+    def _show_failure_status(self) -> None:
+        code = getattr(self.error, "code", None)
+        try:
+            message = self._catalogs.text(code) if isinstance(code, str) else None
+        except CatalogError:
+            message = None
+        self.status_label.setText(message or self._catalogs.text("results.generation_failed"))
 
     def show_export_result(self, path) -> None:
         self._export_status = self._catalogs.text("results.exported_copy", path=str(path))
@@ -172,6 +209,12 @@ class ResultsPage(QWidget):
             control.setAccessibleName(control.text())
         if self.state == "published":
             self._show_published_status()
+        elif self.state == "running":
+            self._show_running_status()
+        elif self.state == "failed":
+            self._show_failure_status()
+        elif self.state == "cancelled":
+            self.status_label.setText(self._catalogs.text("generation.cancelled"))
 
     def _show_published_status(self) -> None:
         result = self.result

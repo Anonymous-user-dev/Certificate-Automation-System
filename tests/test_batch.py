@@ -244,20 +244,20 @@ def _typed_request(tmp_path, docx_factory, *, approved=True, **selected):
         "Awards",
         dataset.order,
         PrintSettings(Decimal("612"), Decimal("792"), "portrait")
-        if selected.get("combined_pdf", True) else None,
+        if selected.get("combined_pdf", True) or selected.get("individual_pdf", False) else None,
     )
     plan = MappingPlan({"FULL_NAME": ColumnValue("full_name")})
     if not approved:
         return BatchRequest(dataset, template, plan, outputs, "zh_CN")
     inputs = ApprovalInput(
         1, dataset.revision, dataset.canonical_sha256(), dataset.source.sha256,
-        template.sha256, plan.to_json(), {"reviewed": True}, ("preview",), (),
+        template.sha256, plan.to_json(), {"reviewed": True, "expected_pages": 1}, ("preview",), (),
         None, outputs.to_json(),
         outputs.print_settings.to_json() if outputs.print_settings is not None else {},
         True, "FakeConverter", "zh_CN", len(outputs.row_ids),
         0, {"docx": len(outputs.row_ids) if outputs.docx else 0,
             "pdf": len(outputs.row_ids) if outputs.individual_pdf else 0,
-            "combined": int(outputs.combined_pdf)},
+            "combined": int(outputs.combined_pdf), "manifest": 1, "report": 1},
         len(outputs.row_ids), str(destination.resolve()), "pending", template.path.name,
     )
     approval = ApprovalService.freeze(inputs, "Preparer")
@@ -378,6 +378,65 @@ def test_typed_generation_blocks_publication_when_pdf_differs_from_approved_page
 
     assert caught.value.code == "print.not_ready"
     assert not list(outputs.destination.glob("Awards-revision-*"))
+
+
+@pytest.mark.parametrize(
+    ("pages", "width", "crop_width", "rotation", "error_code"),
+    [
+        (2, 612, None, 0, "print.page_count_mismatch"),
+        (1, 600, None, 0, "print.not_ready"),
+        (1, 612, 600, 0, "print.not_ready"),
+        (1, 612, None, 90, "print.not_ready"),
+    ],
+)
+def test_individual_only_pdf_must_match_frozen_layout_review(
+    tmp_path, docx_factory, pages, width, crop_width, rotation, error_code,
+):
+    class ChangedLayoutConverter(FakeConverter):
+        def convert(self, docx_path, pdf_path, on_attempt=None):
+            writer = PdfWriter()
+            for _ in range(pages):
+                page = writer.add_blank_page(width=width, height=792)
+                if crop_width is not None:
+                    page.cropbox.upper_right = (crop_width, 792)
+                if rotation:
+                    page.rotate(rotation)
+            with pdf_path.open("wb") as stream:
+                writer.write(stream)
+            writer.close()
+
+    request = _typed_request(
+        tmp_path, docx_factory, individual_pdf=True, combined_pdf=False,
+    )
+    with pytest.raises(BatchGenerationError) as caught:
+        _generator(ChangedLayoutConverter()).generate(request)
+
+    assert caught.value.code == error_code
+    assert not list(request.destination.glob("Awards-revision-*"))
+
+
+@pytest.mark.parametrize("missing_fact", ["expected_pages", "print_settings"])
+def test_pdf_generation_requires_frozen_layout_facts(tmp_path, docx_factory, missing_fact):
+    from dataclasses import replace
+
+    basic = _typed_request(tmp_path, docx_factory, individual_pdf=True, combined_pdf=False)
+    if missing_fact == "expected_pages":
+        inputs = replace(basic.approval_input, health_review={"reviewed": True})
+        outputs = basic.outputs
+        expected_code = "preview.page_count_unknown"
+    else:
+        outputs = replace(basic.outputs, print_settings=None)
+        inputs = replace(basic.approval_input, print_settings={}, outputs=outputs.to_json())
+        expected_code = "output.print_settings_required"
+    approval = ApprovalService.freeze(inputs, "Preparer")
+    request = replace(basic, outputs=outputs, approval_input=inputs, approval=approval,
+                      approval_digest=approval.snapshot.digest)
+
+    with pytest.raises(BatchGenerationError) as caught:
+        _generator(FakeConverter()).generate(request)
+
+    assert caught.value.code == expected_code
+    assert not list(request.destination.glob("Awards-revision-*"))
 
 
 def test_typed_generation_rejects_changed_source_file_before_staging(tmp_path, docx_factory):

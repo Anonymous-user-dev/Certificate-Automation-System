@@ -163,3 +163,24 @@ def test_acceptance_refuses_non_executable_installer(tmp_path):
 
     assert result.returncode != 0
     assert "INSTALLER_MUST_BE_EXE" in result.stderr
+
+
+def test_acceptance_does_not_claim_source_tests_or_basic_smoke_as_installed_gates():
+    script = (ROOT / "scripts" / "windows-release-acceptance.ps1").read_text("utf-8")
+
+    assert 'Invoke-Gate "save_and_recover" { & $application "--workflow-smoke-test" }' not in script
+    assert 'Invoke-Gate "unicode_and_long_paths" { & $application "--workflow-smoke-test" }' not in script
+    assert 'Invoke-Gate "all_input_families" { & $PythonExecutable -m pytest' not in script
+    assert 'Invoke-Gate "mixed_script_50_recipient_batch" { & $PythonExecutable -m pytest' not in script
+    assert 'Invoke-Gate "locked_file_recovery" { & $PythonExecutable -m pytest' not in script
+    assert "source_checks" in script
+
+
+def test_release_verifier_uses_isolated_nonregistering_payload_install():
+    verifier = (ROOT / "packaging" / "verify-release.ps1").read_text("utf-8")
+    installer = (ROOT / "packaging" / "installer.iss").read_text("utf-8")
+
+    assert "verify-payload.ps1" in verifier
+    assert "/RELEASEVERIFY=1" in verifier
+    assert "CreateUninstallRegKey=not IsReleaseVerification" in installer
+    assert "Uninstallable=not IsReleaseVerification" in installer

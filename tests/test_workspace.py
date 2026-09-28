@@ -209,6 +209,15 @@ def test_published_result_is_recorded_in_project_history(workspace, tmp_path):
     assert str(revision) in ProjectStore.open(project_path).load().published_revisions
 
 
+def test_cancelled_generation_is_not_reported_as_published_and_allows_retry(workspace):
+    workspace._generation_finished(BatchResult(BatchState.CANCELLED))
+
+    assert workspace.results_page.state == "cancelled"
+    assert workspace.results_page.generate_button.isEnabled()
+    assert not workspace.results_page.open_output_button.isEnabled()
+    assert workspace.catalogs.text("generation.cancelled") in workspace.results_page.status_label.text()
+
+
 def test_output_step_opens_final_approval_before_results(workspace, tmp_path):
     workspace.new_project(tmp_path / "Approval.certproject")
     workspace.state = replace(

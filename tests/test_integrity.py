@@ -42,10 +42,12 @@ def revision(tmp_path):
         journal_id="batch-1", ordered_row_ids=("row-1",),
         platform_report={"volume": "NTFS"},
         workflow={"snapshot": {"digest": "a" * 64, "recipient_count": 1,
-                               "output_counts": {"docx": 1, "pdf": 1, "combined": 0}}},
+                               "output_counts": {"docx": 1, "pdf": 1, "combined": 0,
+                                                 "manifest": 1, "report": 1, "separator": 0}}},
     )
     write_manifest(context, folder / "manifest.json")
-    counts = {"recipients": 1, "docx": 1, "pdf": 1, "combined": 0}
+    counts = {"recipients": 1, "docx": 1, "pdf": 1, "combined": 0,
+              "manifest": 1, "report": 1, "separator": 0}
     (folder / "batch_journal.json").write_text(json.dumps({
         "schema_version": 1, "batch_id": "batch-1", "state": "published",
         "approval_digest": "a" * 64, "revision": 1,
@@ -82,6 +84,84 @@ def test_integrity_rejects_extra_file_with_same_name_ignoring_case(revision):
 def test_integrity_rejects_missing_publication_journal(revision):
     (revision / "batch_journal.json").unlink()
     assert not IntegrityService().verify_revision(revision).valid
+
+
+def test_integrity_requires_report_after_coordinated_file_and_manifest_removal(revision):
+    manifest_path = revision / "manifest.json"
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    manifest["artifacts"] = [
+        item for item in manifest["artifacts"] if item["filename"] != "batch_summary.html"
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    (revision / "batch_summary.html").unlink()
+
+    report = IntegrityService().verify_revision(revision)
+
+    assert not report.valid
+    assert "integrity.report_missing" in report.issues
+
+
+@pytest.mark.parametrize(("kind", "wrong_count"), [("report", 0), ("manifest", 0), ("separator", 1)])
+def test_integrity_compares_every_external_frozen_artifact_count(revision, kind, wrong_count):
+    from certificate_automation.approval import ApprovalSnapshot
+
+    counts = {"docx": 1, "pdf": 1, "combined": 0, "report": 1, "manifest": 1, "separator": 0}
+    counts[kind] = wrong_count
+    frozen = ApprovalSnapshot("a" * 64, 1, 1, counts, ())
+
+    report = IntegrityService().verify_revision(revision, approved_snapshot=frozen)
+
+    assert not report.valid
+    assert "integrity.external_approval_mismatch" in report.issues
+
+
+@pytest.mark.parametrize(("kind", "wrong_count"), [("report", 0), ("manifest", 0), ("separator", 1)])
+def test_integrity_compares_every_stored_frozen_artifact_count(revision, kind, wrong_count):
+    manifest_path = revision / "manifest.json"
+    journal_path = revision / "batch_journal.json"
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    journal = json.loads(journal_path.read_text("utf-8"))
+    journal["intended_counts"][kind] = wrong_count
+    manifest["workflow"]["snapshot"]["output_counts"][kind] = wrong_count
+    journal["approval_facts_sha256"] = approval_facts_digest(
+        "a" * 64, journal["intended_counts"], journal["approved_row_ids"],
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    report = IntegrityService().verify_revision(revision)
+
+    assert not report.valid
+    assert "integrity.approval_output_mismatch" in report.issues
+
+
+def test_external_approval_rejects_coordinated_report_count_and_artifact_removal(revision):
+    from certificate_automation.approval import ApprovalSnapshot
+
+    frozen = ApprovalSnapshot(
+        "a" * 64, 1, 1,
+        {"docx": 1, "pdf": 1, "combined": 0, "report": 1, "manifest": 1, "separator": 0}, (),
+    )
+    manifest_path = revision / "manifest.json"
+    journal_path = revision / "batch_journal.json"
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    journal = json.loads(journal_path.read_text("utf-8"))
+    manifest["artifacts"] = [
+        item for item in manifest["artifacts"] if item["filename"] != "batch_summary.html"
+    ]
+    manifest["workflow"]["snapshot"]["output_counts"]["report"] = 0
+    journal["intended_counts"]["report"] = 0
+    journal["approval_facts_sha256"] = approval_facts_digest(
+        "a" * 64, journal["intended_counts"], journal["approved_row_ids"],
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    (revision / "batch_summary.html").unlink()
+
+    report = IntegrityService().verify_revision(revision, approved_snapshot=frozen)
+
+    assert not report.valid
+    assert "integrity.external_approval_mismatch" in report.issues
 
 
 def test_integrity_rejects_coherently_removed_recipient_and_artifacts(revision):
@@ -161,6 +241,7 @@ def test_integrity_detects_combined_page_swap_even_with_updated_file_hash(tmp_pa
     from certificate_automation.audit import pdf_page_fingerprints
     folder = tmp_path / "Awards-revision-1"
     folder.mkdir()
+    (folder / "batch_summary.html").write_text("summary", encoding="utf-8")
     template = tmp_path / "template.docx"
     template.write_bytes(b"template")
     first = folder / "first.pdf"

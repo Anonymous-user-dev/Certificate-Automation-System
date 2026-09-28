@@ -84,6 +84,8 @@ packaging\verify-release.ps1 -Application dist\CertificateAutomation\Certificate
 packaging\sign-release.ps1 -RequireSigning -CertificateThumbprint $env:CERTIFICATE_SIGNING_THUMBPRINT -TimestampUrl $env:CERTIFICATE_TIMESTAMP_URL -Application dist\CertificateAutomation\CertificateAutomation.exe -Installer dist\installer\CertificateAutomation-Setup-3.0.0.exe
 ```
 
+The signing command verifies the application bundle first, rebuilds the installer from that exact signed bundle, signs the new installer, and then verifies the installed payload. Do not substitute a previously built installer.
+
 Run `scripts\windows-release-acceptance.ps1` separately on clean Windows 10 22H2, Windows 11 24H2, and Windows 11 25H2 x64 machines at 100%, 150%, and 200% display scale. Until evidence for the exact installer SHA-256 exists, `release-metadata.json` records each unavailable row as `machine_verification_pending`; it never treats an untested machine as verified.
 
 ## Project layout

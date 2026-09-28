@@ -90,6 +90,10 @@ $gateIds = @(
 )
 $results = [ordered]@{}
 foreach ($id in $gateIds) { $results[$id] = [ordered]@{ id = $id; status = "not_run"; detail = $null } }
+$sourceChecks = [ordered]@{}
+foreach ($id in @("source_input_families", "source_mixed_script_batch", "source_recovery")) {
+    $sourceChecks[$id] = [ordered]@{ id = $id; status = "not_run"; detail = "Source-only evidence; it does not satisfy an installed-artifact gate." }
+}
 
 function Invoke-Gate([string] $Id, [scriptblock] $Action) {
     try {
@@ -103,6 +107,19 @@ function Invoke-Gate([string] $Id, [scriptblock] $Action) {
     }
 }
 
+function Invoke-SourceCheck([string] $Id, [scriptblock] $Action) {
+    try {
+        $global:LASTEXITCODE = 0
+        & $Action
+        if ($LASTEXITCODE -ne 0) { throw "Process exited with code $LASTEXITCODE" }
+        $sourceChecks[$Id].status = "passed"
+        $sourceChecks[$Id].detail = "Source-only evidence; installed payload gate remains not_run."
+    } catch {
+        $sourceChecks[$Id].status = "failed"
+        $sourceChecks[$Id].detail = $_.Exception.Message
+    }
+}
+
 if (-not $RecordOnly) {
     $installLog = Join-Path $evidenceDirectory "install.log"
     Invoke-Gate "silent_clean_install" {
@@ -111,11 +128,14 @@ if (-not $RecordOnly) {
     }
     $application = Join-Path $env:LOCALAPPDATA "Programs\CertificateAutomation\CertificateAutomation.exe"
     Invoke-Gate "responsive_launch" { & $application "--ui-smoke-test" }
-    Invoke-Gate "all_input_families" { & $PythonExecutable -m pytest "tests/windows/test_release_acceptance.py::test_release_accepts_every_offline_source_family" -q }
-    Invoke-Gate "save_and_recover" { & $application "--workflow-smoke-test" }
-    Invoke-Gate "mixed_script_50_recipient_batch" { & $PythonExecutable -m pytest "tests/windows/test_release_acceptance.py::test_real_word_publishes_verified_50_recipient_mixed_script_batch" -m word_integration -q }
-    Invoke-Gate "unicode_and_long_paths" { & $application "--workflow-smoke-test" }
-    Invoke-Gate "locked_file_recovery" { & $PythonExecutable -m pytest "tests/test_recovery.py" -q }
+    $results["all_input_families"].detail = "Installed-artifact scenario is not implemented; source evidence is recorded separately."
+    $results["save_and_recover"].detail = "Installed-artifact save/corrupt/recover scenario is not implemented."
+    $results["mixed_script_50_recipient_batch"].detail = "Installed-artifact 50-recipient Word scenario is not implemented; source evidence is recorded separately."
+    $results["unicode_and_long_paths"].detail = "Installed-artifact Unicode and long-path scenario is not implemented."
+    $results["locked_file_recovery"].detail = "Installed-artifact locked-file scenario is not implemented; source evidence is recorded separately."
+    Invoke-SourceCheck "source_input_families" { & $PythonExecutable -m pytest "tests/windows/test_release_acceptance.py::test_release_accepts_every_offline_source_family" -q }
+    Invoke-SourceCheck "source_mixed_script_batch" { & $PythonExecutable -m pytest "tests/windows/test_release_acceptance.py::test_real_word_publishes_verified_50_recipient_mixed_script_batch" -m word_integration -q }
+    Invoke-SourceCheck "source_recovery" { & $PythonExecutable -m pytest "tests/test_recovery.py" -q }
     if ($PriorInstaller) {
         Invoke-Gate "upgrade_from_2_1_1" {
             $prior = Start-Process -FilePath $PriorInstaller -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-") -Wait -PassThru
@@ -171,6 +191,7 @@ $payload = [ordered]@{
         publisher = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { $null }
     }
     tests = $testResults
+    source_checks = @($sourceChecks.Values)
     overall_status = $overall
 }
 $output = Join-Path $evidenceDirectory "acceptance.json"
