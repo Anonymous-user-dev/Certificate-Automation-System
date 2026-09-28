@@ -1,6 +1,6 @@
 # Optional PDF-Native Template Mode
 
-**Status:** Approved conversational design; written specification awaiting review  
+**Status:** Approved
 **Date:** 2026-09-27  
 **Product:** Certificate Automation 3.x, fully offline Windows desktop application
 
