@@ -306,6 +306,28 @@ def test_schema3_round_trip_preserves_pdf_layout_and_mode(tmp_path):
     assert PdfTemplateLayout.from_json(reopened.pdf_layout) == layout
 
 
+def test_pdf_layout_is_deeply_immutable_and_remains_json_serializable(tmp_path):
+    layout = PdfTemplateLayout(
+        "a" * 64,
+        (PdfPageGeometry(0, (0, 0, 200, 300), (0, 0, 200, 300)),),
+        (PdfFieldLayout("FULL_NAME", 0, (10, 20, 100, 25), "noto_sans", 12),),
+    )
+    source_payload = layout.to_json()
+    state = ProjectState(
+        revision=1, dataset=_dataset(), template_mode="pdf_overlay",
+        template_sha256=layout.template_sha256, pdf_layout=source_payload,
+    )
+    source_payload["pages"][0]["crop_box"][0] = 99
+
+    with pytest.raises(TypeError):
+        state.pdf_layout["pages"][0]["crop_box"][0] = 99
+
+    payload = state.to_payload()
+    assert payload["pdf_layout"] == layout.to_json()
+    reopened = ProjectState.from_payload(payload)
+    assert PdfTemplateLayout.from_json(reopened.pdf_layout) == layout
+
+
 def test_changed_pdf_bytes_invalidate_layout_and_decisions(tmp_path):
     template = tmp_path / "background.pdf"
     template.write_bytes(b"old")

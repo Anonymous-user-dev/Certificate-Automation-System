@@ -76,7 +76,7 @@ class ProjectState:
                 raise ProjectError("project.pdf_layout_hash_mismatch")
             if self.template_mode != TemplateMode.PDF_OVERLAY.value:
                 raise ProjectError("project.pdf_layout_mode_mismatch")
-        object.__setattr__(self, "pdf_layout", _frozen_json_mapping(self.pdf_layout))
+        object.__setattr__(self, "pdf_layout", _deep_frozen_json_mapping(self.pdf_layout))
         object.__setattr__(
             self,
             "mapping_plan",
@@ -452,6 +452,20 @@ def _frozen_json_mapping(value: Mapping[str, object] | None):
     if value is None:
         return None
     return MappingProxyType(_plain_json(value))
+
+
+def _deep_frozen_json_mapping(value: Mapping[str, object] | None):
+    if value is None:
+        return None
+    return _deep_freeze_json(_plain_json(value))
+
+
+def _deep_freeze_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _deep_freeze_json(item) for key, item in value.items()})
+    if isinstance(value, (tuple, list)):
+        return tuple(_deep_freeze_json(item) for item in value)
+    return value
 
 
 def _plain_json(value: object) -> object:

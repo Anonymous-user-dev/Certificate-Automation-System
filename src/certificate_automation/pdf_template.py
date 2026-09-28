@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
+from io import BytesIO
 import json
 import math
 from pathlib import Path
@@ -261,9 +262,64 @@ class PdfTemplateInspection:
 
 
 def _dictionary(value: object) -> DictionaryObject | dict:
-    if hasattr(value, "get_object"):
-        value = value.get_object()
+    value = _resolve_pdf_object(value)
     return value if isinstance(value, (DictionaryObject, dict)) else {}
+
+
+def _object_identity(value: object) -> tuple[object, ...]:
+    object_number = getattr(value, "idnum", None)
+    generation = getattr(value, "generation", None)
+    document = getattr(value, "pdf", None)
+    if object_number is not None and generation is not None and document is not None:
+        return ("indirect", id(document), object_number, generation)
+    return ("direct", id(value))
+
+
+def _resolve_pdf_object(value: object) -> object:
+    seen: set[tuple[object, ...]] = set()
+    while (
+        getattr(value, "idnum", None) is not None
+        and getattr(value, "generation", None) is not None
+        and getattr(value, "pdf", None) is not None
+        and callable(getattr(value, "get_object", None))
+    ):
+        identity = _object_identity(value)
+        if identity in seen:
+            return None
+        seen.add(identity)
+        value = value.get_object()
+    return value
+
+
+def _has_transparency(group: object, resources: object) -> bool:
+    """Inspect page resources and reachable Form XObjects without recursion."""
+
+    if str(_dictionary(group).get("/S", "")) == "/Transparency":
+        return True
+    pending = [resources]
+    visited: set[tuple[object, ...]] = set()
+    while pending:
+        resource_value = pending.pop()
+        resource_identity = _object_identity(resource_value)
+        if resource_identity in visited:
+            continue
+        visited.add(resource_identity)
+        resource_dict = _dictionary(resource_value)
+        if "/ExtGState" in resource_dict:
+            return True
+        xobjects = _dictionary(resource_dict.get("/XObject"))
+        for xobject_value in xobjects.values():
+            xobject_identity = _object_identity(xobject_value)
+            if xobject_identity in visited:
+                continue
+            visited.add(xobject_identity)
+            xobject = _dictionary(xobject_value)
+            if str(xobject.get("/Subtype", "")) != "/Form":
+                continue
+            if str(_dictionary(xobject.get("/Group")).get("/S", "")) == "/Transparency":
+                return True
+            pending.append(xobject.get("/Resources"))
+    return False
 
 
 def _has_signatures(fields: object) -> bool:
@@ -281,8 +337,9 @@ def inspect_pdf_template(path: Path) -> PdfTemplateInspection:
     if path.suffix.casefold() != ".pdf":
         raise PdfTemplateError("pdf.unsupported_type")
     try:
-        digest = sha256(path.read_bytes()).hexdigest()
-        with path.open("rb") as source:
+        snapshot = path.read_bytes()
+        digest = sha256(snapshot).hexdigest()
+        with BytesIO(snapshot) as source:
             reader = PdfReader(source, strict=True)
             if reader.is_encrypted:
                 raise PdfTemplateError("pdf.encrypted")
@@ -303,11 +360,7 @@ def inspect_pdf_template(path: Path) -> PdfTemplateInspection:
                 issues.append(PdfTemplateIssue("pdf.existing_signature", "blocking"))
             if any(page.get("/Annots") for page in reader.pages):
                 issues.append(PdfTemplateIssue("pdf.annotations", "warning"))
-            if any(
-                str(_dictionary(page.get("/Group")).get("/S", "")) == "/Transparency"
-                or "/ExtGState" in _dictionary(page.get("/Resources"))
-                for page in reader.pages
-            ):
+            if any(_has_transparency(page.get("/Group"), page.get("/Resources")) for page in reader.pages):
                 issues.append(PdfTemplateIssue("pdf.transparency", "warning"))
             if "/EmbeddedFiles" in names or root.get("/AF"):
                 issues.append(PdfTemplateIssue("pdf.embedded_files", "warning"))
