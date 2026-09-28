@@ -33,7 +33,7 @@ certificate-automation = "certificate_automation.app:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-certificate_automation = ["locales/*.json"]
+certificate_automation = ["locales/*.json", "assets/fonts/*.ttf", "assets/fonts/*.otf", "assets/fonts/*.txt", "assets/fonts/*.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

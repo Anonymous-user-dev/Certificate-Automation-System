@@ -10,6 +10,7 @@ analysis = Analysis(
     binaries=[],
     datas=[
         (str(SOURCE / "certificate_automation" / "locales" / "*.json"), "certificate_automation/locales"),
+        (str(SOURCE / "certificate_automation" / "assets" / "fonts" / "*"), "certificate_automation/assets/fonts"),
         (str(ROOT / "docs" / "user-guide.md"), "docs"),
         (str(ROOT / "examples" / "sample_recipients.csv"), "examples"),
         (str(ROOT / "examples" / "sample_students.xlsx"), "examples"),
