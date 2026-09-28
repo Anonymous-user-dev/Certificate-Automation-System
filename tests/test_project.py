@@ -11,6 +11,7 @@ import pytest
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
 from certificate_automation.mapping import ColumnValue, MappingPlan
 from certificate_automation.output_options import OutputOptions
+from certificate_automation.pdf_template import PdfFieldLayout, PdfPageGeometry, PdfTemplateLayout, inspect_pdf_template
 from certificate_automation.project import (
     ProjectCoordinator,
     ProjectCorruptError,
@@ -217,7 +218,7 @@ def test_schema2_project_fields_survive_round_trip(tmp_path):
     store.save(state)
 
     reopened = ProjectStore.open(store.path).load()
-    assert reopened.schema_version == 2
+    assert reopened.schema_version == 3
     assert reopened.project_name == "奖项 Анна"
     assert reopened.profile_path == tmp_path / "settings.profile"
     assert reopened.approval == {"digest": "abc", "reviewer": "Mira"}
@@ -275,3 +276,60 @@ def test_schema1_payload_reads_with_safe_defaults(tmp_path):
     assert reopened.approval is None
     assert reopened.published_revisions == ()
     assert reopened.print_settings is None
+
+
+def test_schema3_round_trip_preserves_pdf_layout_and_mode(tmp_path):
+    from pypdf import PdfWriter
+
+    template = tmp_path / "background.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=300)
+    with template.open("wb") as output:
+        writer.write(output)
+    inspection = inspect_pdf_template(template)
+    layout = PdfTemplateLayout(
+        inspection.sha256, inspection.pages,
+        (PdfFieldLayout("FULL_NAME", 0, (10, 20, 100, 25), "noto_sans", 12),),
+    )
+    state = ProjectState(
+        revision=1, dataset=_dataset(), template_mode="pdf_overlay",
+        template_path=template, template_sha256=inspection.sha256,
+        pdf_layout=layout.to_json(),
+    )
+    store = ProjectStore.create(tmp_path / "pdf.certproject")
+
+    store.save(state)
+    reopened = ProjectStore.open(store.path).load()
+
+    assert reopened.schema_version == 3
+    assert reopened.template_mode == "pdf_overlay"
+    assert PdfTemplateLayout.from_json(reopened.pdf_layout) == layout
+
+
+def test_changed_pdf_bytes_invalidate_layout_and_decisions(tmp_path):
+    template = tmp_path / "background.pdf"
+    template.write_bytes(b"old")
+    original_hash = sha256(b"old").hexdigest()
+    layout = PdfTemplateLayout(
+        original_hash, (PdfPageGeometry(0, (0, 0, 200, 300), (0, 0, 200, 300)),),
+        (PdfFieldLayout("FULL_NAME", 0, (10, 20, 100, 25), "noto_sans", 12),),
+    )
+    state = ProjectState(
+        revision=4, dataset=_dataset(), template_mode="pdf_overlay",
+        template_path=template, template_sha256=original_hash,
+        pdf_layout=layout.to_json(), layout_review={"reviewed": True},
+        mapping_plan={"FULL_NAME": {"type": "column", "column_id": "full_name"}},
+        output_options={"individual_pdf": True}, acknowledgements=("warning",),
+        approval={"digest": "approved"},
+    )
+    template.write_bytes(b"changed")
+
+    reconciled = state.reconcile_template()
+
+    assert reconciled.template_sha256 == sha256(b"changed").hexdigest()
+    assert reconciled.pdf_layout is None
+    assert reconciled.layout_review is None
+    assert reconciled.mapping_plan is None
+    assert reconciled.output_options is None
+    assert reconciled.acknowledgements == ()
+    assert reconciled.approval is None

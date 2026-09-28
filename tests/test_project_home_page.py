@@ -105,7 +105,7 @@ def test_example_copies_installed_sources_into_editable_project(tmp_path):
     assert _sample_hashes(source) == originals
     assert all((destination / name).is_file() for name in originals)
     state = ProjectStore.open(project).load()
-    assert state.schema_version == 2
+    assert state.schema_version == 3
     assert state.dataset.source.path == destination / "sample_recipients.csv"
     assert state.template_path == destination / "sample_certificate_template.docx"
     assert len(state.dataset.rows) == 3

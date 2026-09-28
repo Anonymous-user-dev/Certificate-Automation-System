@@ -568,7 +568,7 @@ def test_new_project_saves_real_edits_and_updates_status(workspace, qtbot, tmp_p
 
     loaded = ProjectStore.open(path).load()
     assert loaded.dataset.rows[0].value("column-1") == "Ada"
-    assert loaded.schema_version == 2
+    assert loaded.schema_version == 3
 
 
 def test_load_project_reopens_saved_data_and_recent_catalog(workspace, tmp_path):
@@ -664,7 +664,7 @@ def test_loading_older_project_migrates_and_shows_backup_location(workspace, tmp
 
     backup = path.with_name(f"{path.name}.pre-v2-backup")
     assert backup.is_file()
-    assert ProjectStore.open(path).load().schema_version == 2
+    assert ProjectStore.open(path).load().schema_version == 3
     assert backup.name in workspace.statusBar().currentMessage()
 
 
@@ -917,7 +917,7 @@ def test_newer_schema_is_visible_read_only_and_cannot_silently_edit_or_generate(
     workspace.new_project(path)
     before = ProjectStore.open(path).load().dataset.rows[0].value("column-1")
     with closing(sqlite3.connect(path)) as connection, connection:
-        connection.execute("UPDATE metadata SET value='3' WHERE key='schema_version'")
+        connection.execute("UPDATE metadata SET value='4' WHERE key='schema_version'")
 
     workspace.load_project(path)
 
@@ -948,7 +948,7 @@ def test_newer_schema_disables_restored_mapping_review_and_output_edits(
     template = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
     _saved_with_downstream_state(workspace, path, template, tmp_path)
     with closing(sqlite3.connect(path)) as connection, connection:
-        connection.execute("UPDATE metadata SET value='3' WHERE key='schema_version'")
+        connection.execute("UPDATE metadata SET value='4' WHERE key='schema_version'")
 
     workspace.load_project(path)
 
@@ -995,7 +995,7 @@ def test_read_only_project_disables_profile_mutations(workspace, tmp_path, docx_
     template = docx_factory(paragraph_runs=[["{{FULL_NAME}}"]])
     _saved_with_downstream_state(workspace, path, template, tmp_path)
     with closing(sqlite3.connect(path)) as connection, connection:
-        connection.execute("UPDATE metadata SET value='3' WHERE key='schema_version'")
+        connection.execute("UPDATE metadata SET value='4' WHERE key='schema_version'")
     workspace.load_project(path)
     assert not workspace.match_page.save_profile_button.isEnabled()
     assert not workspace.match_page.apply_profile_button.isEnabled()

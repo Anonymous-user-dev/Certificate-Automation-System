@@ -52,12 +52,12 @@ def test_migration_creates_valid_backup_before_replacing_source(schema1_project)
 
     assert result.path == schema1_project
     assert result.from_version == 1
-    assert result.to_version == 2
+    assert result.to_version == 3
     assert result.backup_path == schema1_project.with_name("source.certproject.pre-v2-backup")
     assert result.backup_path.is_file()
     assert ProjectStore.open(result.backup_path).load().schema_version == 1
     migrated = ProjectStore.open(schema1_project).load()
-    assert migrated.schema_version == 2
+    assert migrated.schema_version == 3
     assert migrated.revision == 2
     assert migrated.dataset.rows[0].value("name") == "Ana García"
 
@@ -156,7 +156,7 @@ def test_pending_wal_failure_preserves_all_source_bytes(schema1_project, failure
         assert saved_at == "2026-09-23T12:00:00+00:00"
 
 
-def test_pending_wal_success_publishes_schema2_without_stale_sidecars(schema1_project):
+def test_pending_wal_success_publishes_schema3_without_stale_sidecars(schema1_project):
     _leave_pending_wal(schema1_project)
     wal = schema1_project.with_name(f"{schema1_project.name}-wal")
     shm = schema1_project.with_name(f"{schema1_project.name}-shm")
@@ -167,7 +167,7 @@ def test_pending_wal_success_publishes_schema2_without_stale_sidecars(schema1_pr
     assert not wal.exists()
     assert not shm.exists()
     migrated = ProjectStore.open(schema1_project).load()
-    assert migrated.schema_version == 2
+    assert migrated.schema_version == 3
     assert migrated.revision == 2
     backup = ProjectStore.open(result.backup_path).load()
     assert backup.schema_version == 1
@@ -365,7 +365,7 @@ def test_lease_excludes_writer_at_final_replace(schema1_project):
 
     assert writer_blocked
     assert not lease_active
-    assert ProjectStore.open(schema1_project).load().schema_version == 2
+    assert ProjectStore.open(schema1_project).load().schema_version == 3
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="exercises Linux SQLite POSIX locks")
@@ -421,7 +421,7 @@ finally:
         assert {path: path.read_bytes() if path.exists() else None for path in paths} == before
     else:
         result = service.migrate(schema1_project)
-        assert ProjectStore.open(schema1_project).load().schema_version == 2
+        assert ProjectStore.open(schema1_project).load().schema_version == 3
         assert ProjectStore.open(result.backup_path).load().schema_version == 1
     assert probes == ["SQLITE_BUSY"]
     assert not list(schema1_project.parent.glob(".source.certproject.*.tmp*"))
@@ -524,7 +524,7 @@ def test_migration_accepts_unicode_path(tmp_path, schema1_project):
     result = ProjectMigrationService().migrate(path)
 
     assert result.path == path
-    assert ProjectStore.open(path).load().schema_version == 2
+    assert ProjectStore.open(path).load().schema_version == 3
 
 
 def test_migration_accepts_long_path_when_filesystem_supports_it(tmp_path, schema1_project):
@@ -540,4 +540,34 @@ def test_migration_accepts_long_path_when_filesystem_supports_it(tmp_path, schem
 
     ProjectMigrationService().migrate(path)
 
-    assert ProjectStore.open(path).load().schema_version == 2
+    assert ProjectStore.open(path).load().schema_version == 3
+
+
+def test_schema2_project_migrates_to_docx_mode_with_verified_backup(tmp_path):
+    path = tmp_path / "schema2.certproject"
+    dataset = TabularDataset(
+        (Column("name", "Name"),), (DataRow("row-1", 1, {"name": "Ada"}),),
+        SourceSnapshot("manual", "People", None, "a" * 64, datetime(2026, 9, 22, tzinfo=timezone.utc), {}),
+    )
+    payload = ProjectState(1, dataset).to_payload()
+    payload["schema_version"] = 2
+    payload.pop("template_mode", None)
+    payload.pop("pdf_layout", None)
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        connection.execute("INSERT INTO metadata VALUES ('schema_version', '2')")
+        connection.execute("CREATE TABLE revisions (revision INTEGER PRIMARY KEY, saved_at TEXT NOT NULL, payload_json TEXT NOT NULL, payload_sha256 TEXT NOT NULL)")
+        connection.execute("INSERT INTO revisions VALUES (1, '2026-09-22T00:00:00+00:00', ?, ?)",
+                           (encoded, sha256(encoded.encode("utf-8")).hexdigest()))
+
+    result = ProjectMigrationService().migrate(path)
+    migrated = ProjectStore.open(path).load()
+
+    assert result.from_version == 2
+    assert result.to_version == 3
+    assert result.backup_path.name == "schema2.certproject.pre-v3-backup"
+    assert migrated.schema_version == 3
+    assert migrated.template_mode == "docx"
+    assert migrated.pdf_layout is None
+    assert ProjectStore.open(result.backup_path).load().schema_version == 2

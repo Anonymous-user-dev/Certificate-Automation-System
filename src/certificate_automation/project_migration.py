@@ -16,7 +16,7 @@ import struct
 import sys
 import tempfile
 
-from certificate_automation.project import ProjectError, ProjectState, ProjectStore
+from certificate_automation.project import SCHEMA_VERSION, ProjectError, ProjectState, ProjectStore
 
 
 class ProjectMigrationError(ProjectError):
@@ -169,7 +169,7 @@ class ProjectMigrationService:
 
     def _migrate_locked(self, path: Path, lease: ProjectMigrationLease) -> MigrationResult:
         path = Path(path)
-        backup_path = path.with_name(f"{path.name}.pre-v2-backup")
+        backup_path: Path | None = None
         source_snapshot: Path | None = None
         backup_temp: Path | None = None
         migrated_temp: Path | None = None
@@ -182,23 +182,27 @@ class ProjectMigrationService:
                 self._file_digest(Path(f"{source_snapshot}-wal")) != source_state[1]
             ):
                 raise ProjectMigrationError("project.migration_source_changed")
-            self._validate(source_snapshot, version=1)
+            source_version = self._schema_version(source_snapshot)
+            if source_version not in (1, 2):
+                raise ProjectMigrationError("project.migration_invalid_source")
+            backup_path = path.with_name(f"{path.name}.pre-v{source_version + 1}-backup")
+            self._validate(source_snapshot, version=source_version)
             backup_temp = self._temporary(path)
             self._files.copy_database(source_snapshot, backup_temp)
-            self._validate(backup_temp, version=1, code="project.migration_invalid_backup")
+            self._validate(backup_temp, version=source_version, code="project.migration_invalid_backup")
             self._files.replace(backup_temp, backup_path)
             backup_temp = None
 
             migrated_temp = self._temporary(path)
             self._files.copy_database(backup_path, migrated_temp)
             self._rewrite_schema(migrated_temp)
-            self._validate(migrated_temp, version=2, code="project.migration_invalid_staging")
+            self._validate(migrated_temp, version=SCHEMA_VERSION, code="project.migration_invalid_staging")
             self._remove_temporary(source_snapshot)
             source_snapshot = None
             lease.protect_replacement(migrated_temp)
             self._publish(migrated_temp, path, source_state, lease)
             migrated_temp = None
-            return MigrationResult(path, backup_path, 1, 2)
+            return MigrationResult(path, backup_path, source_version, SCHEMA_VERSION)
         except ProjectMigrationError:
             raise
         except (OSError, sqlite3.Error, ProjectError, ValueError, TypeError, KeyError) as error:
@@ -211,6 +215,15 @@ class ProjectMigrationService:
                             Path(f"{temporary}{suffix}").unlink(missing_ok=True)
                         except OSError:
                             pass
+
+    @staticmethod
+    def _schema_version(path: Path) -> int:
+        try:
+            with closing(_read_only_connection(path)) as connection:
+                row = connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
+            return int(row[0]) if row is not None else -1
+        except (OSError, sqlite3.Error, TypeError, ValueError, IndexError) as error:
+            raise ProjectMigrationError("project.migration_invalid_source") from error
 
     @staticmethod
     def _temporary(path: Path) -> Path:
@@ -369,7 +382,7 @@ class ProjectMigrationService:
             with connection:
                 rows = connection.execute("SELECT revision, payload_json FROM revisions").fetchall()
                 for revision, payload_text in rows:
-                    state = replace(ProjectState.from_payload(json.loads(payload_text)), schema_version=2)
+                    state = replace(ProjectState.from_payload(json.loads(payload_text)), schema_version=SCHEMA_VERSION)
                     migrated_text = json.dumps(
                         state.to_payload(), ensure_ascii=False, sort_keys=True, separators=(",", ":"),
                     )
@@ -378,7 +391,7 @@ class ProjectMigrationService:
                         (migrated_text, sha256(migrated_text.encode("utf-8")).hexdigest(), revision),
                     )
                 connection.execute(
-                    "UPDATE metadata SET value='2' WHERE key='schema_version'"
+                    "UPDATE metadata SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),)
                 )
         with path.open("rb") as migrated:
             os.fsync(migrated.fileno())

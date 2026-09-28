@@ -18,9 +18,10 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
 from certificate_automation.history import DuplicatePolicy, HistoryError
+from certificate_automation.pdf_template import PdfTemplateError, PdfTemplateLayout, TemplateMode
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 BACKUP_COUNT = 3
 
 
@@ -61,10 +62,21 @@ class ProjectState:
     published_revisions: tuple[str, ...] = ()
     print_settings: Mapping[str, object] | None = None
     duplicate_policy: Mapping[str, object] | None = None
+    template_mode: str = TemplateMode.DOCX.value
+    pdf_layout: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if self.revision < 0:
             raise ProjectError("project.invalid_revision")
+        if self.template_mode not in (TemplateMode.DOCX.value, TemplateMode.PDF_OVERLAY.value):
+            raise ProjectError("project.invalid_template_mode")
+        if self.pdf_layout is not None:
+            layout = PdfTemplateLayout.from_json(self.pdf_layout)
+            if self.template_sha256 is not None and layout.template_sha256 != self.template_sha256:
+                raise ProjectError("project.pdf_layout_hash_mismatch")
+            if self.template_mode != TemplateMode.PDF_OVERLAY.value:
+                raise ProjectError("project.pdf_layout_mode_mismatch")
+        object.__setattr__(self, "pdf_layout", _frozen_json_mapping(self.pdf_layout))
         object.__setattr__(
             self,
             "mapping_plan",
@@ -111,6 +123,7 @@ class ProjectState:
             revision=self.revision + 1,
             template_sha256=current_hash,
             template_inspection=None,
+            pdf_layout=None,
             layout_review=None,
             mapping_plan=None,
             output_options=None,
@@ -141,6 +154,8 @@ class ProjectState:
             "published_revisions": list(self.published_revisions),
             "print_settings": _plain_json(self.print_settings),
             "duplicate_policy": _plain_json(self.duplicate_policy),
+            "template_mode": self.template_mode,
+            "pdf_layout": _plain_json(self.pdf_layout),
         }
 
     @classmethod
@@ -165,6 +180,8 @@ class ProjectState:
             published_revisions=tuple(payload.get("published_revisions", ())),
             print_settings=payload.get("print_settings"),
             duplicate_policy=payload.get("duplicate_policy"),
+            template_mode=payload.get("template_mode", TemplateMode.DOCX.value),
+            pdf_layout=payload.get("pdf_layout"),
         )
 
 
@@ -301,7 +318,7 @@ class ProjectStore:
             try:
                 payload = json.loads(payload_text)
                 return ProjectState.from_payload(payload)
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError, HistoryError):
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError, HistoryError, ProjectError, PdfTemplateError):
                 continue
         raise ProjectCorruptError("project.no_valid_revision")
 
