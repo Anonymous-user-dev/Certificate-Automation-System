@@ -114,6 +114,7 @@ class PdfFieldLayout:
     color: str = "#000000"
     alignment: str = "left"
     line_mode: str = "single"
+    max_lines: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip() or "{" in self.name or "}" in self.name:
@@ -135,11 +136,18 @@ class PdfFieldLayout:
             raise PdfTemplateError("pdf.invalid_color")
         if self.alignment not in ("left", "center", "right") or self.line_mode not in ("single", "multi"):
             raise PdfTemplateError("pdf.invalid_field_style")
+        if self.max_lines is not None and (type(self.max_lines) is not int or self.max_lines < 1):
+            raise PdfTemplateError("pdf.invalid_max_lines")
+        if self.line_mode == "single" and self.max_lines not in (None, 1):
+            raise PdfTemplateError("pdf.invalid_max_lines")
 
     def to_json(self) -> dict[str, object]:
-        return {"name": self.name, "page_index": self.page_index, "rect": list(self.rect),
+        result = {"name": self.name, "page_index": self.page_index, "rect": list(self.rect),
                 "font_family": self.font_family, "font_size": self.font_size,
                 "color": self.color, "alignment": self.alignment, "line_mode": self.line_mode}
+        if self.max_lines is not None:
+            result["max_lines"] = self.max_lines
+        return result
 
     @classmethod
     def from_json(cls, data: Mapping[str, object]) -> "PdfFieldLayout":

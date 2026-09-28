@@ -15,7 +15,8 @@ from PySide6.QtGui import (
     QColor, QFont, QFontDatabase, QFontMetricsF, QGuiApplication, QImage,
     QPageLayout, QPageSize, QPainter, QPdfWriter, QRawFont, QTextLayout, QTextOption,
 )
-from pypdf import PdfReader, PdfWriter
+from pypdf import PdfReader, PdfWriter, Transformation
+from pypdf.generic import RectangleObject
 
 from certificate_automation.pdf_template import (
     PdfFieldLayout, PdfTemplateError, PdfTemplateLayout, inspect_pdf_template,
@@ -42,6 +43,7 @@ class FontRegistry:
     """The exact redistributable fonts allowed in PDF overlays."""
 
     _qt_families: dict[tuple[int, str], str] = {}
+    _verified_material: dict[tuple[str, str], tuple[tuple[int, int, int, int, int], bytes]] = {}
     _FONTS = {
         "noto_sans": (
             "NotoSans-Regular.ttf",
@@ -67,25 +69,42 @@ class FontRegistry:
             raise ValueError("pdf.invalid_font") from error
 
     def path(self, family: str) -> Path:
+        path, _ = self._font_bytes(family)
+        return path
+
+    def _font_bytes(self, family: str) -> tuple[Path, bytes]:
         try:
             filename, expected_hash = self._FONTS[family]
         except KeyError as error:
             raise ValueError("pdf.invalid_font") from error
         path = self._root / filename
         try:
-            actual_hash = sha256(path.read_bytes()).hexdigest()
+            status = path.stat()
         except OSError as error:
             raise ValueError("pdf.font_unavailable") from error
+        fingerprint = (status.st_dev, status.st_ino, status.st_size,
+                       status.st_mtime_ns, status.st_ctime_ns)
+        cache_key = (str(path.resolve()), expected_hash)
+        cached = self._verified_material.get(cache_key)
+        if cached is not None and cached[0] == fingerprint:
+            return path, cached[1]
+        try:
+            material = path.read_bytes()
+        except OSError as error:
+            raise ValueError("pdf.font_unavailable") from error
+        actual_hash = sha256(material).hexdigest()
         if actual_hash != expected_hash:
             raise ValueError("pdf.font_integrity")
-        return path
+        self._verified_material[cache_key] = (fingerprint, material)
+        return path, material
 
     def supports_character(self, family: str, character: str) -> bool:
         if len(character) != 1:
             raise ValueError("pdf.invalid_character")
         if QGuiApplication.instance() is None:
             raise ValueError("pdf.qt_application_required")
-        font = QRawFont(str(self.path(family)), 12)
+        _, material = self._font_bytes(family)
+        font = QRawFont(QByteArray(material), 12)
         if not font.isValid():
             raise ValueError("pdf.font_unavailable")
         return font.supportsCharacter(ord(character))
@@ -94,10 +113,11 @@ class FontRegistry:
         app = QGuiApplication.instance()
         if app is None:
             raise ValueError("pdf.qt_application_required")
-        path = str(self.path(family))
+        path, material = self._font_bytes(family)
+        path = str(path)
         key = (id(app), path)
         if key not in self._qt_families:
-            font_id = QFontDatabase.addApplicationFont(path)
+            font_id = QFontDatabase.addApplicationFontFromData(QByteArray(material))
             families = QFontDatabase.applicationFontFamilies(font_id)
             if font_id < 0 or len(families) != 1:
                 raise ValueError("pdf.font_unavailable")
@@ -108,11 +128,11 @@ class FontRegistry:
         return font
 
 
-def _text_layouts(value: str, font: QFont, width: float, multi: bool) -> tuple[list[QTextLayout], float, float]:
+def _text_layouts(value: str, font: QFont, width: float, multi: bool) -> tuple[list[QTextLayout], float, float, int]:
     """Shape once with Qt; the same lines are measured and later drawn."""
 
     if not value:
-        return [], 0.0, 0.0
+        return [], 0.0, 0.0, 0
     image = QImage(1, 1, QImage.Format.Format_ARGB32_Premultiplied)
     image.setDotsPerMeterX(round(72 / 0.0254))
     image.setDotsPerMeterY(round(72 / 0.0254))
@@ -120,10 +140,12 @@ def _text_layouts(value: str, font: QFont, width: float, multi: bool) -> tuple[l
     line_height = metrics.lineSpacing()
     y = 0.0
     largest_width = 0.0
+    line_count = 0
     layouts: list[QTextLayout] = []
     for paragraph in value.split("\n") if multi else (value,):
         if not paragraph:
             y += line_height
+            line_count += 1
             continue
         layout = QTextLayout(paragraph, font)
         option = QTextOption()
@@ -139,9 +161,10 @@ def _text_layouts(value: str, font: QFont, width: float, multi: bool) -> tuple[l
             line.setPosition(QPointF(0, y))
             largest_width = max(largest_width, line.naturalTextWidth())
             y += max(line_height, line.height())
+            line_count += 1
         layout.endLayout()
         layouts.append(layout)
-    return layouts, largest_width, y
+    return layouts, largest_width, y, line_count
 
 
 class PdfOverlayRenderer:
@@ -163,7 +186,8 @@ class PdfOverlayRenderer:
                 continue
             value = values[field.name]
             try:
-                raw_font = QRawFont(str(self.fonts.path(field.font_family)), field.font_size)
+                _, material = self.fonts._font_bytes(field.font_family)
+                raw_font = QRawFont(QByteArray(material), field.font_size)
                 font = self.fonts.qt_font(field.font_family, field.font_size)
             except ValueError as error:
                 issues.append(PdfOverlayIssue(str(error), field.name))
@@ -178,10 +202,11 @@ class PdfOverlayRenderer:
             if "\n" in value and field.line_mode == "single":
                 issues.append(PdfOverlayIssue("pdf.text_does_not_fit", field.name))
                 continue
-            _, text_width, text_height = _text_layouts(
+            _, text_width, text_height, line_count = _text_layouts(
                 value, font, field.rect[2], field.line_mode == "multi"
             )
-            if text_width > field.rect[2] + 0.01 or text_height > field.rect[3] + 0.01:
+            if (text_width > field.rect[2] + 0.01 or text_height > field.rect[3] + 0.01
+                    or field.max_lines is not None and line_count > field.max_lines):
                 issues.append(PdfOverlayIssue("pdf.text_does_not_fit", field.name))
         return tuple(issues)
 
@@ -208,15 +233,20 @@ class PdfOverlayRenderer:
         source_bytes = template_path.read_bytes()
         if sha256(source_bytes).hexdigest() != layout.template_sha256:
             raise PdfOverlayError("pdf.template_changed")
-        source = PdfReader(BytesIO(source_bytes), strict=True)
-        writer = PdfWriter()
-        for geometry, page in zip(layout.pages, source.pages, strict=True):
+        writer = PdfWriter(clone_from=BytesIO(source_bytes))
+        for geometry, output_page in zip(layout.pages, writer.pages, strict=True):
             page_fields = [field for field in layout.fields if field.page_index == geometry.index]
-            output_page = writer.add_page(page)
             if page_fields:
                 overlay = self._overlay_page(geometry, page_fields, values)
                 self._verify_overlay_fonts(overlay, any(values[field.name] for field in page_fields))
-                output_page.merge_page(PdfReader(BytesIO(overlay), strict=True).pages[0])
+                overlay_writer = PdfWriter(clone_from=BytesIO(overlay))
+                overlay_page = overlay_writer.pages[0]
+                overlay_page.add_transformation(
+                    Transformation().translate(geometry.media_box[0], geometry.media_box[1])
+                )
+                overlay_page.mediabox = RectangleObject(geometry.media_box)
+                overlay_page.cropbox = RectangleObject(geometry.media_box)
+                output_page.merge_page(overlay_page)
 
         temporary_path: Path | None = None
         try:
@@ -277,8 +307,8 @@ class PdfOverlayRenderer:
             font = self.fonts.qt_font(field.font_family, field.font_size)
             painter.setFont(font)
             x, y, box_width, _ = field.rect
-            layouts, _, _ = _text_layouts(values[field.name], font, box_width,
-                                          field.line_mode == "multi")
+            layouts, _, _, _ = _text_layouts(values[field.name], font, box_width,
+                                             field.line_mode == "multi")
             for text_layout in layouts:
                 for line_index in range(text_layout.lineCount()):
                     line = text_layout.lineAt(line_index)

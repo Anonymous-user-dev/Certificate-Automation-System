@@ -93,6 +93,39 @@ def test_layout_json_digest_and_immutability(tmp_path):
     assert TemplateMode.PDF_OVERLAY.value == "pdf_overlay"
 
 
+def test_explicit_line_limit_is_validated_serialized_and_binds_digest(tmp_path):
+    inspection = inspect_pdf_template(_pdf(tmp_path))
+    two = PdfTemplateLayout(inspection.sha256, inspection.pages,
+                            (_field(line_mode="multi", max_lines=2),))
+    three = PdfTemplateLayout(inspection.sha256, inspection.pages,
+                              (_field(line_mode="multi", max_lines=3),))
+
+    assert two.fields[0].max_lines == 2
+    assert two.to_json()["fields"][0]["max_lines"] == 2
+    assert PdfTemplateLayout.from_json(two.to_json()) == two
+    assert two.digest() != three.digest()
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5, "2"])
+def test_invalid_explicit_line_limits_are_rejected(limit):
+    with pytest.raises(PdfTemplateError, match="pdf.invalid_max_lines"):
+        _field(line_mode="multi", max_lines=limit)
+
+
+def test_legacy_layout_without_line_limit_keeps_json_and_digest(tmp_path):
+    inspection = inspect_pdf_template(_pdf(tmp_path))
+    legacy = PdfTemplateLayout(inspection.sha256, inspection.pages,
+                               (_field(line_mode="multi"),))
+    old_json = legacy.to_json()
+    old_digest = legacy.digest()
+
+    assert "max_lines" not in old_json["fields"][0]
+    restored = PdfTemplateLayout.from_json(old_json)
+    assert restored.fields[0].max_lines is None
+    assert restored.to_json() == old_json
+    assert restored.digest() == old_digest
+
+
 @pytest.mark.parametrize("name", ["", "   ", "{{NAME}}", "X}Y", "{X"])
 def test_invalid_field_names_are_rejected(name):
     with pytest.raises(PdfTemplateError, match="pdf.invalid_field_name"):

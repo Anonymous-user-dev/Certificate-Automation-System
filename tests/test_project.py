@@ -289,7 +289,8 @@ def test_schema3_round_trip_preserves_pdf_layout_and_mode(tmp_path):
     inspection = inspect_pdf_template(template)
     layout = PdfTemplateLayout(
         inspection.sha256, inspection.pages,
-        (PdfFieldLayout("FULL_NAME", 0, (10, 20, 100, 25), "noto_sans", 12),),
+        (PdfFieldLayout("FULL_NAME", 0, (10, 20, 100, 50), "noto_sans", 12,
+                        line_mode="multi", max_lines=2),),
     )
     state = ProjectState(
         revision=1, dataset=_dataset(), template_mode="pdf_overlay",
@@ -304,6 +305,8 @@ def test_schema3_round_trip_preserves_pdf_layout_and_mode(tmp_path):
     assert reopened.schema_version == 3
     assert reopened.template_mode == "pdf_overlay"
     assert PdfTemplateLayout.from_json(reopened.pdf_layout) == layout
+    assert reopened.pdf_layout["fields"][0]["max_lines"] == 2
+    assert PdfTemplateLayout.from_json(reopened.pdf_layout).digest() == layout.digest()
 
 
 def test_pdf_layout_is_deeply_immutable_and_remains_json_serializable(tmp_path):

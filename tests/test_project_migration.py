@@ -12,6 +12,7 @@ import time
 import pytest
 
 from certificate_automation.dataset import Column, DataRow, SourceSnapshot, TabularDataset
+from certificate_automation.pdf_template import PdfFieldLayout, PdfPageGeometry, PdfTemplateLayout
 from certificate_automation.project import ProjectState, ProjectStore
 from certificate_automation.project_migration import (
     ProjectMigrationError,
@@ -571,3 +572,37 @@ def test_schema2_project_migrates_to_docx_mode_with_verified_backup(tmp_path):
     assert migrated.template_mode == "docx"
     assert migrated.pdf_layout is None
     assert ProjectStore.open(result.backup_path).load().schema_version == 2
+
+
+def test_migration_preserves_explicit_pdf_line_limit_in_existing_payload(tmp_path):
+    path = tmp_path / "schema2-pdf.certproject"
+    dataset = TabularDataset(
+        (Column("name", "Name"),), (DataRow("row-1", 1, {"name": "Ada"}),),
+        SourceSnapshot("manual", "People", None, "a" * 64,
+                       datetime(2026, 9, 22, tzinfo=timezone.utc), {}),
+    )
+    layout = PdfTemplateLayout(
+        "b" * 64,
+        (PdfPageGeometry(0, (0, 0, 200, 300), (0, 0, 200, 300)),),
+        (PdfFieldLayout("FULL_NAME", 0, (10, 20, 100, 50), "noto_sans", 12,
+                        line_mode="multi", max_lines=2),),
+    )
+    payload = ProjectState(
+        1, dataset, template_mode="pdf_overlay", template_sha256="b" * 64,
+        pdf_layout=layout.to_json(),
+    ).to_payload()
+    payload["schema_version"] = 2
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        connection.execute("INSERT INTO metadata VALUES ('schema_version', '2')")
+        connection.execute("CREATE TABLE revisions (revision INTEGER PRIMARY KEY, saved_at TEXT NOT NULL, payload_json TEXT NOT NULL, payload_sha256 TEXT NOT NULL)")
+        connection.execute("INSERT INTO revisions VALUES (1, '2026-09-22T00:00:00+00:00', ?, ?)",
+                           (encoded, sha256(encoded.encode("utf-8")).hexdigest()))
+
+    ProjectMigrationService().migrate(path)
+
+    migrated = ProjectStore.open(path).load()
+    assert migrated.schema_version == 3
+    assert PdfTemplateLayout.from_json(migrated.pdf_layout).digest() == layout.digest()
+    assert migrated.pdf_layout["fields"][0]["max_lines"] == 2

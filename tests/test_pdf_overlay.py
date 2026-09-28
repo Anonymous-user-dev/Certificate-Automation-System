@@ -7,7 +7,7 @@ import shutil
 
 import pytest
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import ArrayObject, DictionaryObject, NameObject, RectangleObject
+from pypdf.generic import ArrayObject, DictionaryObject, NameObject, RectangleObject, TextStringObject
 from PySide6.QtCore import QSize
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtGui import QFontDatabase, QTextLayout
@@ -56,18 +56,44 @@ def test_reusing_packaged_font_does_not_register_duplicate_qt_copies(qapp, tmp_p
     original = FontRegistry().path("noto_sans")
     shutil.copyfile(original, tmp_path / original.name)
     registry = FontRegistry(tmp_path)
-    real_add = QFontDatabase.addApplicationFont
+    real_add = QFontDatabase.addApplicationFontFromData
     additions = []
 
-    def recording_add(path):
-        additions.append(path)
-        return real_add(path)
+    def recording_add(data):
+        additions.append(len(data))
+        return real_add(data)
 
-    monkeypatch.setattr(QFontDatabase, "addApplicationFont", staticmethod(recording_add))
+    monkeypatch.setattr(QFontDatabase, "addApplicationFontFromData", staticmethod(recording_add))
     assert registry.qt_font("noto_sans", 12).family() == "Noto Sans"
     assert registry.qt_font("noto_sans", 18).family() == "Noto Sans"
     assert FontRegistry(tmp_path).qt_font("noto_sans", 24).family() == "Noto Sans"
-    assert additions == [str(tmp_path / original.name)]
+    assert additions == [original.stat().st_size]
+
+
+def test_registry_reuses_verified_font_bytes_and_detects_later_tampering(qapp, tmp_path, monkeypatch):
+    original = FontRegistry().path("noto_sans")
+    copied = tmp_path / original.name
+    shutil.copyfile(original, copied)
+    registry = FontRegistry(tmp_path)
+    actual_read = Path.read_bytes
+    reads = []
+
+    def counting_read(path):
+        if path == copied:
+            reads.append(path)
+        return actual_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read)
+    assert registry.path("noto_sans") == copied
+    assert registry.qt_font("noto_sans", 12).family() == "Noto Sans"
+    assert registry.supports_character("noto_sans", "Ж")
+    assert registry.qt_font("noto_sans", 18).family() == "Noto Sans"
+    assert reads == [copied]
+
+    with copied.open("ab") as output:
+        output.write(b"tampered")
+    with pytest.raises(ValueError, match="pdf.font_integrity"):
+        registry.qt_font("noto_sans", 12)
 
 
 def _template(tmp_path: Path, pages=((200, 300, (0, 0, 200, 300), 0),)) -> Path:
@@ -84,10 +110,10 @@ def _template(tmp_path: Path, pages=((200, 300, (0, 0, 200, 300), 0),)) -> Path:
 
 
 def _layout(path: Path, *, rect=(20, 30, 150, 30), text_mode="single", page_index=0,
-            family="noto_sans_cjk_sc", font_size=12) -> PdfTemplateLayout:
+            family="noto_sans_cjk_sc", font_size=12, max_lines=None) -> PdfTemplateLayout:
     inspection = inspect_pdf_template(path)
     field = PdfFieldLayout("FULL_NAME", page_index, rect, family, font_size,
-                           line_mode=text_mode)
+                           line_mode=text_mode, max_lines=max_lines)
     return PdfTemplateLayout(inspection.sha256, inspection.pages, (field,))
 
 
@@ -138,6 +164,21 @@ def test_multi_line_wrap_is_explicit_and_bounded_by_height(qapp, tmp_path):
     assert [issue.code for issue in single] == ["pdf.text_does_not_fit"]
     assert multi == ()
     assert [issue.code for issue in too_short] == ["pdf.text_does_not_fit"]
+
+
+def test_explicit_line_limit_rejects_wrap_even_when_rectangle_has_room(qapp, tmp_path):
+    path = _template(tmp_path)
+    value = "Ada Lovelace Charles Babbage"
+    renderer = PdfOverlayRenderer()
+    limited = _layout(path, rect=(20, 30, 70, 120), text_mode="multi", max_lines=3)
+    approved = _layout(path, rect=(20, 30, 70, 120), text_mode="multi", max_lines=4)
+
+    assert [issue.code for issue in renderer.inspect_fit(limited, {"FULL_NAME": value})] == [
+        "pdf.text_does_not_fit"]
+    assert renderer.inspect_fit(approved, {"FULL_NAME": value}) == ()
+    with pytest.raises(PdfOverlayError, match="pdf.text_does_not_fit"):
+        renderer.render(path, tmp_path / "too-many-lines.pdf", limited, {"FULL_NAME": value})
+    assert not (tmp_path / "too-many-lines.pdf").exists()
 
 
 def test_missing_glyph_and_unmapped_value_are_explicit(qapp, tmp_path):
@@ -339,3 +380,64 @@ def test_rasterized_text_stays_inside_crop_relative_field_at_every_rotation(qapp
     assert 29 <= top <= 40
     assert right <= 111
     assert bottom <= 61
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_off_origin_media_box_keeps_field_visible_in_approved_rect(qapp, tmp_path, rotation):
+    path = tmp_path / "off-origin.pdf"
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=200, height=300)
+    page.mediabox = RectangleObject((100, 200, 300, 500))
+    page.cropbox = RectangleObject((110, 220, 290, 470))
+    if rotation:
+        page.rotate(rotation)
+    with path.open("wb") as output:
+        writer.write(output)
+    layout = _layout(path, rect=(20, 30, 90, 30), family="noto_sans")
+    destination = tmp_path / "out.pdf"
+
+    PdfOverlayRenderer().render(path, destination, layout, {"FULL_NAME": "Ada"})
+
+    result_page = PdfReader(destination, strict=True).pages[0]
+    assert tuple(float(value) for value in result_page.mediabox) == (100, 200, 300, 500)
+    assert tuple(float(value) for value in result_page.cropbox) == (110, 220, 290, 470)
+    assert result_page.rotation == rotation
+    pdf = QPdfDocument(qapp)
+    assert pdf.load(str(destination)) == QPdfDocument.Error.None_
+    size = pdf.pagePointSize(0)
+    image = pdf.render(0, QSize(round(size.width()), round(size.height())))
+    ink = [(x, y) for y in range(image.height()) for x in range(image.width())
+           if image.pixelColor(x, y).alpha() > 30]
+    pdf.close()
+    assert ink
+    assert 19 <= min(x for x, _ in ink) <= 30
+    assert 29 <= min(y for _, y in ink) <= 40
+    assert max(x for x, _ in ink) <= 111
+    assert max(y for _, y in ink) <= 61
+
+
+def test_render_preserves_attachment_names_and_interactive_form_catalog(qapp, tmp_path):
+    path = tmp_path / "catalog.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=300)
+    writer.add_attachment("evidence.txt", b"original attachment")
+    field = writer._add_object(DictionaryObject({
+        NameObject("/T"): TextStringObject("ORIGINAL_FORM"),
+        NameObject("/FT"): NameObject("/Tx"),
+        NameObject("/V"): TextStringObject("kept"),
+    }))
+    writer._root_object[NameObject("/AcroForm")] = DictionaryObject({
+        NameObject("/Fields"): ArrayObject([field])
+    })
+    with path.open("wb") as output:
+        writer.write(output)
+    source = PdfReader(path)
+    assert source.attachments["evidence.txt"] == [b"original attachment"]
+    assert source.get_fields()["ORIGINAL_FORM"].value == "kept"
+    destination = tmp_path / "out.pdf"
+
+    PdfOverlayRenderer().render(path, destination, _layout(path), {"FULL_NAME": "Ada"})
+
+    result = PdfReader(destination)
+    assert result.attachments["evidence.txt"] == [b"original attachment"]
+    assert result.get_fields()["ORIGINAL_FORM"].value == "kept"
