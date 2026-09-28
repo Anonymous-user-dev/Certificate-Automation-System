@@ -42,6 +42,9 @@ class OutputPage(QWidget):
         self.individual_pdf = QCheckBox()
         self.individual_pdf.setChecked(True)
         self.combined_pdf = QCheckBox()
+        self.advanced_toggle = QPushButton()
+        self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setProperty("role", "disclosure")
         self.geometry_help = QLabel()
         self.geometry_help.setWordWrap(True)
         self.print_width_label = QLabel()
@@ -85,34 +88,41 @@ class OutputPage(QWidget):
         destination_row = QHBoxLayout()
         destination_row.addWidget(self.destination, 1)
         destination_row.addWidget(self.browse_button)
-        layout = QVBoxLayout(self)
-        layout.addWidget(self.title)
-        layout.addWidget(self.docx)
-        layout.addWidget(self.individual_pdf)
-        layout.addWidget(self.combined_pdf)
-        layout.addWidget(self.geometry_help)
+        self.advanced_panel = QWidget()
+        advanced_layout = QVBoxLayout(self.advanced_panel)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.addWidget(self.geometry_help)
         geometry_row = QHBoxLayout()
         geometry_row.addWidget(self.print_width_label)
         geometry_row.addWidget(self.print_width)
         geometry_row.addWidget(self.print_height_label)
         geometry_row.addWidget(self.print_height)
         geometry_row.addWidget(self.print_orientation)
-        layout.addLayout(geometry_row)
+        advanced_layout.addLayout(geometry_row)
         separator_row = QHBoxLayout()
         separator_row.addWidget(self.separator_enabled)
         separator_row.addWidget(self.separator_every_label)
         separator_row.addWidget(self.separator_every)
-        layout.addLayout(separator_row)
-        layout.addWidget(self.page_forecast)
-        layout.addWidget(self.printing_note)
+        advanced_layout.addLayout(separator_row)
+        advanced_layout.addWidget(self.page_forecast)
+        advanced_layout.addWidget(self.printing_note)
+        advanced_layout.addWidget(self.order_list)
+        self.advanced_panel.hide()
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.title)
+        layout.addWidget(self.docx)
+        layout.addWidget(self.individual_pdf)
+        layout.addWidget(self.combined_pdf)
         layout.addWidget(self.word_status)
         layout.addWidget(self.summary_label)
         layout.addLayout(destination_row)
         layout.addWidget(self.batch_name)
-        layout.addWidget(self.order_list)
+        layout.addWidget(self.advanced_toggle)
+        layout.addWidget(self.advanced_panel)
         layout.addWidget(self.error_label)
         layout.addWidget(self.continue_button)
         self.browse_button.clicked.connect(self._browse)
+        self.advanced_toggle.toggled.connect(self.advanced_panel.setVisible)
         self.continue_button.clicked.connect(self._accept)
         for control in (self.docx, self.individual_pdf, self.combined_pdf):
             control.toggled.connect(self._update_summary)
@@ -227,11 +237,15 @@ class OutputPage(QWidget):
             (self.individual_pdf, "output.individual_pdf"),
             (self.combined_pdf, "output.combined_pdf"),
             (self.browse_button, "output.choose_destination"),
+            (self.advanced_toggle, "output.advanced_options"),
             (self.continue_button, "action.continue"),
         )
         for control, key in controls:
             control.setText(self._catalogs.text(key))
             control.setAccessibleName(control.text())
+        self.advanced_toggle.setAccessibleDescription(
+            self._catalogs.text("output.advanced_options_help")
+        )
         self.destination.setPlaceholderText(self._catalogs.text("output.destination"))
         self.destination.setAccessibleName(self._catalogs.text("output.destination"))
         self.batch_name.setAccessibleName(self._catalogs.text("output.batch_name"))
@@ -303,6 +317,16 @@ class OutputPage(QWidget):
         except Exception as error:
             code = getattr(error, "code", "output.invalid")
             self.error_label.setText(self._catalogs.text(code))
+            if code in {
+                "output.print_settings_required",
+                "output.separator_requires_combined",
+                "output.separator_interval_invalid",
+                "output.row_missing",
+                "output.duplicate_row",
+                "output.unknown_row",
+                "output.row_omitted",
+            }:
+                self.advanced_toggle.setChecked(True)
             return
         self.error_label.clear()
         self.options_accepted.emit(options)

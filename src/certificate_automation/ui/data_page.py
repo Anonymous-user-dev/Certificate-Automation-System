@@ -132,6 +132,9 @@ class DataPage(QWidget):
         self.source_label = QLabel()
         self.count_label = QLabel()
         self.search_input = QLineEdit()
+        self.edit_tools_toggle = QPushButton()
+        self.edit_tools_toggle.setCheckable(True)
+        self.edit_tools_toggle.setProperty("role", "disclosure")
         self.add_row_button = QPushButton()
         self.remove_row_button = QPushButton()
         self.add_column_button = QPushButton()
@@ -151,7 +154,13 @@ class DataPage(QWidget):
         ):
             toolbar.addWidget(control)
         toolbar.addStretch(1)
-        toolbar.addWidget(self.search_input)
+        self.edit_tools_panel = QWidget()
+        self.edit_tools_panel.setLayout(toolbar)
+        self.edit_tools_panel.hide()
+        tools_row = QHBoxLayout()
+        tools_row.addWidget(self.edit_tools_toggle)
+        tools_row.addStretch(1)
+        tools_row.addWidget(self.search_input)
 
         initial = create_manual_dataset(("Full Name",))
         self.model = DatasetTableModel(initial, catalogs=self._catalogs)
@@ -174,7 +183,8 @@ class DataPage(QWidget):
         summary.addStretch(1)
         summary.addWidget(self.count_label)
         layout.addLayout(summary)
-        layout.addLayout(toolbar)
+        layout.addLayout(tools_row)
+        layout.addWidget(self.edit_tools_panel)
         layout.addWidget(self.table, 1)
         layout.addWidget(self.issue_list)
         layout.addWidget(self.continue_button)
@@ -186,6 +196,7 @@ class DataPage(QWidget):
         self.paste_button.clicked.connect(self.paste_requested)
         self.manual_button.clicked.connect(lambda: self.import_requested.emit("manual"))
         self.search_input.textChanged.connect(self.model.set_filter)
+        self.edit_tools_toggle.toggled.connect(self.edit_tools_panel.setVisible)
         self.add_row_button.clicked.connect(self._add_row)
         self.remove_row_button.clicked.connect(self._remove_selected_rows)
         self.add_column_button.clicked.connect(self._add_column)
@@ -243,6 +254,7 @@ class DataPage(QWidget):
             (self.delimited_button, "import.csv"),
             (self.paste_button, "import.clipboard"),
             (self.manual_button, "import.manual"),
+            (self.edit_tools_toggle, "data.edit_tools"),
             (self.add_row_button, "data.add_row"),
             (self.remove_row_button, "data.remove_row"),
             (self.add_column_button, "data.add_column"),
@@ -261,6 +273,9 @@ class DataPage(QWidget):
             control.setAccessibleName(translated)
         self.search_input.setPlaceholderText(self._catalogs.text("data.search"))
         self.search_input.setAccessibleName(self._catalogs.text("data.search"))
+        self.edit_tools_toggle.setAccessibleDescription(
+            self._catalogs.text("data.edit_tools_help")
+        )
         self.table.setAccessibleName(self._catalogs.text("data.table"))
         self.issue_list.setAccessibleName(
             self._catalogs.text("accessibility.issue_list")

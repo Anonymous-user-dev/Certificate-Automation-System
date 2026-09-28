@@ -49,6 +49,11 @@ def application_stylesheet(scale: float = 1.0) -> str:
             background: {TOKENS['surface']};
         }}
         QPushButton:hover {{ border-color: {TOKENS['accent']}; }}
+        QPushButton[role="disclosure"] {{
+            text-align: left;
+            color: {TOKENS['accent']};
+            background: {TOKENS['surface_alt']};
+        }}
         QPushButton[role="primary"] {{
             min-height: {primary_height}px;
             background: {TOKENS['accent']};
